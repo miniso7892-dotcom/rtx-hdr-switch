@@ -912,9 +912,12 @@
   const BTN_RETRY_MS = 500;
   const BTN_WAIT_MS = 15000;
   const BTN_APPEND_MS = 3000;
-  // 网站不停删掉我们的按钮时别跟它较劲：10 秒内重插超过 8 次就停手，等下一次导航或换主视频
+  // 网站不停从同一个控制栏里删掉我们的按钮时别跟它较劲：10 秒内重插超过 8 次就停手，等下一次导航或换主视频
+  // （控制栏整个重建、换了新元素不算）
   const BTN_INSERT_WINDOW_MS = 10000;
   const BTN_INSERT_MAX = 8;
+  // 放好以后锚点才出现或换了、按钮被挪到锚点后面时挪回去；每次放置最多挪 3 次，不和别的扩展来回抢位置
+  const BTN_MOVE_MAX = 3;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   // 图标画在 24×24 上：圆角矩形徽标里的 H、D、R 都是路径（不用字体）
   const ICON_LETTERS = 'M4.75 8V16M7.85 8V16M4.75 12H7.85' +
@@ -934,11 +937,13 @@
     'background-color:rgba(28,28,28,.9);color:#eee;font-size:118%;font-weight:500;line-height:15px;';
 
   let btnSite = '';    // 本 frame 的网站（L.playerSite）；空 = 不加按钮
-  let pbtn = null;     // 当前按钮：{el 插进控制栏的元素, btn 可点的元素, icon, dim, tip, tipHost, txpTip, bar, root, video, site, sig, tipOn}
+  // 当前按钮：{el 插进控制栏的元素, btn 可点的元素, icon, dim, tip, tipHost, txpTip,
+  //   bar, root, video, site, anchor 放在它前面（null = 加在最后）, moves 放好后挪过几次, sig, tipOn}
+  let pbtn = null;
   let btnWait = null;  // 控制栏还没出现：{video, href, since, until}；until 为 -1 表示已放弃，等导航或换主视频
   let btnRetryTimer = 0;
   let btnRaf = 0;
-  let btnInserts = [];
+  let btnInserts = new WeakMap(); // 控制栏元素 → 最近往里插按钮的时间
   let btnStyle = null;
   let btnSeq = 0;
   let btnSpace = false;
@@ -948,20 +953,24 @@
     const site = btnSite && settings.playerButton ? PLAYER_BARS[btnSite] : null;
     if (!site) {
       if (pbtn || btnStyle) {
+        if (pbtn) btnInserts.delete(pbtn.bar); // 自己拿掉的，不算网站删的
         removeButton();
         removeBtnStyle();
       }
+      btnWait = null; // 规则里再打开时从头找（之前放弃等待的也重新等）
       return;
     }
+    // 按钮被网站拿掉了（控制栏重建、子元素换掉）：先丢掉，下面重新放。
+    // 等控制栏期间 pbtn 为空，页面的 DOM 变化不会再触发重查
+    if (pbtn && !buttonPlaced()) removeButton();
     const v = primary && primary.isConnected ? primary : null;
     const root = v && !(site.skip && v.closest(site.skip)) ? v.closest(site.root) : null;
     if (!root) {
-      // 主视频不在支持的播放器里（悬停预览、没有可见的视频）：已有的按钮还在原处就留着
-      if (pbtn && !buttonPlaced()) removeButton();
-      else renderButton();
+      // 主视频不在支持的播放器里（悬停预览、没有可见的视频）：已有的按钮留在原处
+      renderButton();
       return;
     }
-    if (pbtn && buttonPlaced() && root.contains(pbtn.bar)) {
+    if (pbtn && root.contains(pbtn.bar)) {
       pbtn.video = v;
       keepInPlace(site);
       renderButton();
@@ -971,11 +980,17 @@
   }
   const syncButton = guard(syncButtonNow);
 
-  // 网站后来才把原生按钮填进控制栏、或者调整了顺序：挪回最合适的那个锚点前面
+  // 网站后来才把原生按钮填进控制栏（按钮先加在了最后）、换了锚点元素、或者把按钮挪到了锚点后面：
+  // 挪回锚点前面。别的扩展插在按钮和锚点之间不算错位
   function keepInPlace(site) {
     const p = pbtn;
     const anchor = anchorIn(p.bar, site.before);
-    if (!anchor || p.el.nextElementSibling === anchor || !insertAllowed()) return;
+    if (!anchor || anchor === p.el || p.moves >= BTN_MOVE_MAX) return;
+    const before = !!(p.el.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING);
+    if (anchor === p.anchor && before) return;
+    p.anchor = anchor;
+    if (before && p.el.nextElementSibling === anchor) return;
+    p.moves++;
     p.bar.insertBefore(p.el, anchor);
   }
 
@@ -1000,7 +1015,7 @@
       return;
     }
     removeButton();
-    if (!insertAllowed()) {
+    if (!insertAllowed(bar)) {
       btnWait = { video: v, href: href, since: Date.now(), until: -1 };
       return;
     }
@@ -1018,17 +1033,17 @@
     b.addEventListener('click', onBtnClick);
     b.addEventListener('keydown', onBtnKeyDown);
     b.addEventListener('keyup', onBtnKeyUp);
+    b.addEventListener('focus', onBtnFocus);
+    b.addEventListener('blur', onBtnBlur);
     if (made.tip) {
       made.tip.className = BTN_CLASS + '-tip';
       made.tip.setAttribute('data-rtxhdr-owner', TOKEN);
       made.tip.setAttribute('aria-hidden', 'true');
       b.addEventListener('mouseenter', onBtnEnter);
       b.addEventListener('mouseleave', onBtnLeave);
-      b.addEventListener('focus', onBtnFocus);
-      b.addEventListener('blur', onBtnLeave);
     }
     bar.insertBefore(el, anchor);
-    pbtn = Object.assign(made, { bar: bar, root: root, video: v, site: btnSite, sig: '', tipOn: false });
+    pbtn = Object.assign(made, { bar: bar, root: root, video: v, site: btnSite, anchor: anchor, moves: 0, sig: '', tipOn: false });
     btnWait = null;
     ensureBtnStyle();
     renderButton();
@@ -1065,18 +1080,19 @@
     scheduleEvaluate();
   });
 
-  function insertAllowed() {
+  function insertAllowed(bar) {
     const now = Date.now();
-    btnInserts = btnInserts.filter((t) => now - t < BTN_INSERT_WINDOW_MS);
-    if (btnInserts.length >= BTN_INSERT_MAX) return false;
-    btnInserts.push(now);
+    const list = (btnInserts.get(bar) || []).filter((t) => now - t < BTN_INSERT_WINDOW_MS);
+    btnInserts.set(bar, list);
+    if (list.length >= BTN_INSERT_MAX) return false;
+    list.push(now);
     return true;
   }
 
   // SPA 导航、播放器重建、往返缓存恢复：重新找控制栏（之前 15 秒没找到的也重新等）
   function kickButton() {
     btnWait = null;
-    btnInserts = [];
+    btnInserts = new WeakMap();
     if (btnSite || pbtn) scheduleEvaluate();
   }
 
@@ -1173,8 +1189,9 @@
     if (e.button === 0) e.preventDefault();
   });
 
-  const onBtnClick = guard(function () {
-    if (btnSpace) return; // 按钮有焦点时的空格是播放器的，不切换
+  const onBtnClick = guard(function (e) {
+    // 按钮有焦点时按空格，<button> 松开时会自己点一下：空格是播放器的，不切换（鼠标点击 detail ≥ 1，照常）
+    if (btnSpace && e.detail === 0) return;
     pressButton();
   });
 
@@ -1200,6 +1217,11 @@
 
   const onBtnEnter = guard(function () { showTip(); });
   const onBtnLeave = guard(function () { hideTip(); });
+  // 空格按下后焦点离开（松开不在按钮上）：别让标记一直留着
+  const onBtnBlur = guard(function () {
+    btnSpace = false;
+    hideTip();
+  });
   // 只有键盘焦点才显示提示
   const onBtnFocus = guard(function (e) {
     let visible = true;

@@ -238,4 +238,24 @@
 
 **全局关闭提示**：本地组件已连接、NVIDIA 全局 HDR 关着（且不是「只关 HDR」在借用）时，视频页签顶部提示并给「开启」按钮；HDR 出错（Windows 没开 HDR 等）时显示原因。
 
-测试：`node test/lib.test.js`（i18n、主题色、建议值、备份、manifest 与 `_locales`）；service worker 逻辑和真实本地组件的端到端在开发时用一次性的 headless Chrome（CDP `Extensions.loadUnpacked`）验证。
+**播放器控制栏按钮（`playerButton`，默认开）**：在网站自己的控制栏里放一个 HDR 按钮，点击 = 对这个视频按一次 `Alt+H`。每个 frame 最多一个，放在主视频所在播放器的控制栏里。
+- 网站按视频所在 frame 自己的完整域名判断（`lib.js` 的 `playerSite(hostname, pathname)`）：`www.bilibili.com`、`bilibili.com`、`player.bilibili.com`；`www.youtube.com`、`youtube.com`，`/embed/` 除外（嵌入播放器是另一套移动端样式的控制栏，没有 `.ytp-right-controls`）；`www.twitch.tv`、`twitch.tv`；`v.qq.com`。B 站直播（控制区鼠标移出就删掉、移入再重建，class 带 svelte 哈希）、爱奇艺（class 名每次构建都变，只在贴片广告时见过）和其他网站不加。
+- 选择器只写在 `content.js` 的 `PLAYER_BARS` 里：从主视频往上找播放器（`root`，在 `skip` 里的悬停预览不算），在播放器里找控制栏右侧（`bars`，取第一个找得到的），插在控制栏里含有 `before` 之一的那个直接子元素前面（依次找）：
+
+| 网站 | root | 控制栏 | 插在前面 |
+|---|---|---|---|
+| B 站 | `.bpx-player-container`（跳过 `.v-recommend-inline-player`） | `.bpx-player-control-bottom-right` | `.bpx-player-ctrl-setting` → `-pip` → `-full`（外链播放器没有前两个） |
+| YouTube | `#movie_player`（跳过 `#inline-preview-player`） | delhi：`.ytp-chrome-bottom .ytp-right-controls-left`（和字幕、设置同一个圆角框）；旧版：`.ytp-right-controls` | `.ytp-subtitles-button` → `.ytp-settings-button` |
+| Twitch | `.video-player` | `.player-controls__right-control-group` | 包着 `[data-a-target="player-settings-button"]` 的那一层 |
+| 腾讯视频 | `#player-component, .txp_player` | `.txp_right_controls` | `.txp_btn_pip` → `.txp_btn_fake` → `.txp_btn_fullscreen` |
+
+- 照原生按钮的结构和 class 造按钮，大小、悬停、全屏变大、键盘焦点框都来自网站自己的 CSS（不写死尺寸）：B 站 `div.bpx-player-ctrl-btn[role=button][tabindex=0] > .bpx-player-ctrl-btn-icon > span.bpx-common-svg-icon > svg`；YouTube `<button class="ytp-button">`；Twitch 的 class 名每次构建都变，运行时照设置按钮抄 class 和外面两层；腾讯 `div.txp_btn > svg.txp_icon + div.txp_tooltip`。
+- 图标：白色「HDR」徽标，开是实心徽标、字母镂空，关是描边徽标加斜杠；画在 24×24 上，用 `createElementNS` 拼路径和 mask（YouTube 页面有 Trusted Types），不用 `<text>` 和字体，不用主题色。原生图标的 viewBox 更大时（YouTube 旧版 36、腾讯 28）居中放，和原生图标一样大。
+- 状态取主视频的实际生效状态（`info.eff`，和报告给角标的是同一个值；「只关 HDR」借全局开关时视频没加滤镜，按钮照样显示关）：开 `aria-pressed="true"`，关 `aria-pressed="false"`；DRM 视频 `aria-disabled="true"`、变暗、提示 `player.drm`，点了不动。文字是 `player.on/off/drm`，跟界面语言。evaluate() 末尾同步，状态或语言变了才写 DOM。
+- 提示：B 站和 YouTube 的提示由它们自己的脚本统一管理，插进来的按钮没有，所以自己画一个（B 站放在按钮里，YouTube 挂在 `#movie_player` 上，全屏时也在全屏元素里；样式照原生，不用 backdrop-filter）；腾讯用它自己的 `.txp_tooltip`；Twitch 用 `title`。
+- 交互：mousedown 时 preventDefault（不抢焦点，网站快捷键照常）；不拦截控制栏里 click 的冒泡（实测不会暂停视频）；回车 = 点击；空格留给播放器（`<button>` 松开空格时自己点的那一下不算）。
+- 稳健性：所有回调包在 guard 里，不外抛异常。播放器或锚点还没出现时每 500 ms 再找，15 秒后放弃，等下一次导航（`yt-navigate-finish`、`yt-player-updated`、`popstate`、`navigatesuccess`、`pageshow`）或主视频换了再找。B 站实测控制栏先出现、原生按钮后填进来：锚点没出现时先等 3 秒，还没有才加在最后，锚点出现后挪过去；每次放置最多挪 3 次，别的扩展插在按钮和锚点之间不算错位，不来回抢。按钮被网站删掉（控制栏重建）时，在已有的 document 观察者里顺带看一眼 `isConnected`，下一帧重新放；网站 10 秒内从同一个控制栏删掉 8 次就停手。不新增 document 级的观察者，自己插入的节点不扫描视频。每秒的 tick、导航事件、fullscreenchange 也会重新检查。B 站小窗（`data-screen="mini"`）用一条样式规则隐藏。
+- 扩展重新加载：按钮、提示、样式都带 `rtxhdr-player-btn` class 和 `data-rtxhdr-owner=<实例标记>`；失效的旧实例收到 `rtxhdrswitch-takeover` 后 destroy 删掉自己的，新实例放按钮前再删掉别的实例留下的。destroy 时按钮一起删掉。
+- 「规则」里的「在播放器控制栏显示 HDR 按钮」改了立即生效：关掉时删掉按钮，打开时从头找。
+
+测试：`node test/lib.test.js`（i18n、主题色、建议值、备份、manifest 与 `_locales`、`playerSite`）；service worker 逻辑和真实本地组件的端到端在开发时用一次性的 headless Chrome（CDP `Extensions.loadUnpacked`）验证。控制栏按钮在开发时用照各网站结构和 CSS 做的本地页面（`--host-resolver-rules` 把真实域名指过去）逐项验证（位置、和原生按钮一样大、点击 / 回车 / 空格、重建后重新放、开关设置、切换语言、DRM、扩展重新加载后不重复），再以游客身份在真实网站上看一遍。

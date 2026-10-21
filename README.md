@@ -11,6 +11,7 @@ A Chrome / Edge extension (Manifest V3) that turns NVIDIA **RTX Video HDR** on o
 ## Features
 
 - **Per-video toggle**: `Alt+H` switches RTX Video HDR for the video you are watching. Works in windowed and fullscreen playback and takes effect immediately, without reloading the page.
+- **HDR button in the player's control bar** on Bilibili, YouTube, Twitch and Tencent Video: one click does what `Alt+H` does, and the button shows whether HDR is on (see [Player button](#player-button)).
 - **Remembers your choice** per video (up to 2000 videos; the oldest are pruned). Videos are recognized by ID on YouTube, Bilibili, Tencent Video, iQIYI and Twitch, and by a cleaned-up URL (tracking parameters removed) everywhere else.
 - **Per-site rules**: always on / always off / follow the other rules.
 - **Automatic white-background detection** (`Alt+Shift+H` toggles it): samples the playing video every 1.5 s and turns HDR off after about 3 s of bright frames.
@@ -95,13 +96,33 @@ Shortcuts only work while a browser window has focus. Change them from the Rules
 
 When the state changes, a small label appears in the top-left corner of the video, e.g. *RTX HDR: on (manual)*, *RTX HDR: off (auto · white)* or *Middle grey 70 nits (+5)*.
 
+### Player button
+
+On these sites an **HDR** button sits among the player's own buttons on the right of its control bar:
+
+- **Bilibili**: video, bangumi, list and festival pages, and Bilibili players embedded in other sites
+- **YouTube**: the watch page
+- **Twitch** and **Tencent Video**
+
+| Button | Meaning |
+|---|---|
+| solid **HDR** badge | The extension is not blocking RTX Video HDR for this video |
+| outlined badge with a slash | Switched to SDR |
+| dimmed | DRM-protected video; the extension can't control it, and clicking does nothing |
+
+- Clicking it, or pressing Enter while it has keyboard focus, does exactly what `Alt+H` does for that video (it counts as a manual choice and is remembered by default). Space stays the player's play/pause key.
+- It uses the site's own button styles, so it looks like the other buttons and grows with them in fullscreen. Hover it to see the state in the interface language.
+- With [Turn off HDR only](#turn-off-hdr-only-keep-super-resolution) on, it shows the video's chosen state, like the toolbar badge.
+- It isn't shown on Bilibili Live, in YouTube embeds and Shorts, on iQIYI or on other sites (use `Alt+H` or the popup there), nor in Bilibili's small floating player. If a site redesigns its player, the button may be missing until the extension is updated; `Alt+H` and the popup keep working.
+- To hide it, uncheck **Show an HDR button in player control bars** in the Rules tab. The change applies to open pages right away.
+
 ### Popup
 
 Switch the language at the top right: 中 / EN / Auto (follows the browser). The popup has three tabs:
 
 - **Video**: the current video's state (big HDR / SDR, the reason, the shortcut), **Switch to SDR / Back to HDR**, **Forget**, the last measured brightness, plus everyday settings: this site (follow rules / always on / always off), white-video detection (turn off only / turn off and on / off) and sensitivity, night mode, and the viewing reminder in minutes (0 = off). If NVIDIA's global HDR is off, a notice with a **Turn on** button appears at the top.
 - **NVIDIA**: NVIDIA's global RTX Video settings, Windows SDR brightness sync and presets, see [NVIDIA settings panel](#nvidia-settings-panel).
-- **Rules**: theme color, HDR on or off when no rule applies, turn off HDR only, the night time range and day/night presets, switch to SDR when the reminder is due, remember manual choices, on-screen labels, shortcuts, and backup export / import.
+- **Rules**: theme color, HDR on or off when no rule applies, turn off HDR only, the night time range and day/night presets, switch to SDR when the reminder is due, remember manual choices, on-screen labels, the player button, shortcuts, and backup export / import.
 
 ### Theme color
 
@@ -240,7 +261,7 @@ node native-host/test/host.test.mjs --live # plus reversible writes (middle grey
 | `background.js` | Service worker: badge, shortcuts, viewing timer, injection on install, day/night presets, SDR follow-up, the HDR lease |
 | `i18n.js` | Interface strings (Chinese / English) |
 | `lib.js` | Pure logic shared by the content script, popup, options page, service worker and tests |
-| `content.js` | Content script: finds videos, applies the filter, samples frames, on-screen labels |
+| `content.js` | Content script: finds videos, applies the filter, samples frames, on-screen labels, the player button |
 | `popup.*` | Popup |
 | `options.*` | Options page (backup) |
 | `icon-draw.js`, `icons/`, `tools/make_icons.py` | Icon: redrawn in the theme color at runtime / static PNGs / generator |

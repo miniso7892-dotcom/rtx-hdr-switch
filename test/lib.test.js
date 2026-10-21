@@ -122,6 +122,16 @@ test('playerSite: 嵌入播放器、直播、其他网站不加按钮', () => {
   assert.equal(L.playerSite('notv.qq.com'), null);
 });
 
+test('playerSite 认得的每个网站在 content.js 的 PLAYER_BARS 里都有选择器', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+  const m = /const PLAYER_BARS = Object\.freeze\(\{([\s\S]*?)\n {2}\}\);/.exec(src);
+  assert.ok(m, '找到 PLAYER_BARS');
+  const keys = Array.from(m[1].matchAll(/^ {4}(\w+): \{/gm), (x) => x[1]).sort();
+  const sites = new Set([['www.bilibili.com', '/video/x'], ['player.bilibili.com', '/player.html'], ['www.youtube.com', '/watch'],
+    ['www.twitch.tv', '/x'], ['v.qq.com', '/x/cover/a/b.html']].map(([h, p]) => L.playerSite(h, p)));
+  assert.deepEqual(keys, Array.from(sites).sort());
+});
+
 // ---------- decide ----------
 
 const S = (patch) => L.mergeSettings(Object.assign({}, patch));
