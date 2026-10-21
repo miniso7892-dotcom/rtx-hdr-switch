@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>RTX HDR 开关</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="top">
+    <h1>RTX HDR 开关</h1>
+    <p class="note">关闭时该视频的 RTX 超分也会一起关闭（Chrome 限制）</p>
+  </header>
+
+  <section class="card" id="video-card">
+    <div id="video-panel" hidden>
+      <div class="status">
+        <div aria-live="polite" aria-atomic="true">
+          <div class="big" id="state-big">HDR 开</div>
+          <div class="reason" id="state-reason"></div>
+        </div>
+        <span class="dot" id="state-dot" aria-hidden="true"></span>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn primary" id="btn-toggle">切换</button>
+        <button type="button" class="btn" id="btn-forget">清除此视频记忆</button>
+      </div>
+      <div class="vnote" id="video-note" hidden></div>
+      <div class="key" id="video-key"></div>
+      <div class="luma" id="video-luma"></div>
+    </div>
+    <div class="message" id="video-message" aria-live="polite">正在读取当前页面…</div>
+  </section>
+
+  <section class="group">
+    <div class="row">
+      <label for="site-rule">本网站 <span class="host" id="site-host"></span></label>
+      <select id="site-rule">
+        <option value="">跟随规则</option>
+        <option value="on">总是开 HDR</option>
+        <option value="off">总是关 HDR</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="group">
+    <h2>自动检测白底/高亮视频</h2>
+    <div class="row">
+      <label for="auto-mode">模式</label>
+      <select id="auto-mode">
+        <option value="off">关闭</option>
+        <option value="disable">只自动关闭（推荐）</option>
+        <option value="both">自动开关</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="sensitivity">灵敏度</label>
+      <select id="sensitivity">
+        <option value="low">低</option>
+        <option value="medium">中</option>
+        <option value="high">高</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="group">
+    <div class="row">
+      <h2 class="inline">夜间护眼</h2>
+      <label class="switch" title="夜间时段内默认关闭 HDR">
+        <input type="checkbox" id="night-enabled" role="switch">
+        <span class="slider" aria-hidden="true"></span>
+        <span class="sr">启用夜间护眼</span>
+      </label>
+    </div>
+    <div class="row">
+      <label for="night-start">时段</label>
+      <span class="times">
+        <input type="time" id="night-start" required>
+        <span class="dash">至</span>
+        <input type="time" id="night-end" required aria-label="结束时间">
+      </span>
+    </div>
+  </section>
+
+  <section class="group">
+    <h2>连续观看提醒</h2>
+    <div class="row">
+      <label for="eye-minutes">提醒间隔（分钟，0 = 关闭）</label>
+      <input type="number" id="eye-minutes" min="0" max="600" step="5" inputmode="numeric">
+    </div>
+    <label class="check"><input type="checkbox" id="eye-autooff"> 到时自动切回 SDR</label>
+  </section>
+
+  <section class="group">
+    <div class="row">
+      <h2 class="inline">默认（没有任何规则时）</h2>
+      <span class="seg" role="radiogroup" aria-label="默认状态">
+        <label><input type="radio" name="default-state" value="on"><span>开</span></label>
+        <label><input type="radio" name="default-state" value="off"><span>关</span></label>
+      </span>
+    </div>
+  </section>
+
+  <section class="group">
+    <h2>其他</h2>
+    <label class="check"><input type="checkbox" id="remember-manual"> 手动切换后记住此视频</label>
+    <label class="check"><input type="checkbox" id="show-osd"> 显示屏幕提示</label>
+  </section>
+
+  <section class="group">
+    <h2>快捷键</h2>
+    <ul class="shortcuts" id="shortcuts"></ul>
+    <button type="button" class="btn small" id="btn-shortcuts">修改快捷键</button>
+  </section>
+
+  <script src="lib.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

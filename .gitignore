@@ -1,0 +1,26 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Node / Python
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+
+# Packed extension builds and signing keys (never commit a .pem)
+*.crx
+*.pem
+*.zip
+dist/
+build/
+
+# Logs
+*.log
