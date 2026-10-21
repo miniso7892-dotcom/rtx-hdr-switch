@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "HDR Switch for RTX Video",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "按视频开关 NVIDIA RTX 视频 HDR（超分会一起关闭）：快捷键、记住选择、自动识别白底视频、夜间护眼与连续观看提醒。",
   "homepage_url": "https://github.com/miniso7892-dotcom/rtx-hdr-switch",
   "minimum_chrome_version": "116",
-  "permissions": ["storage", "scripting", "tabs"],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlxcGG6dHmXDHRmDqtLa4JAIUXgDsVKGHKlTJ0eBQi5Y2L2yyxFa8geSVmhj6C34R/pi0HBhSzZvCQSLBKcOw62hjr3ekYFE3SmbdCm2hdxO+u6l9TxOEBZcvaMGWsqU5l06GcGTY5UA/BWJIvGIwgAOmAVU4ij159XaJQnq3XFR/dUnulJ+B5wj5S0P/bG82sIlyh09fqSeKLieWdO/suhbkG1gECmfCZjO4MFUivQ8uKQ0pnEwJRanECTFK+tkGCwIIDAGx43r4QXiJT6kMsc0U+CpIKahesUSUXmwxUmDTYW+DB1bu0E5zal3AaEmlbMAt2/1qKn6N+7XjsPRoyQIDAQAB",
+  "permissions": ["storage", "scripting", "tabs", "nativeMessaging", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
@@ -47,6 +48,9 @@
     },
     "forget-video": {
       "description": "清除当前视频的记忆（恢复按规则决定）"
+    },
+    "nv-next-preset": {
+      "description": "切换到下一个 NVIDIA 预设"
     }
   }
 }

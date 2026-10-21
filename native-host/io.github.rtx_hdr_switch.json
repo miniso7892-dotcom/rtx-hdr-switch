@@ -1,0 +1,7 @@
+{
+  "name": "io.github.rtx_hdr_switch",
+  "description": "RTX HDR Switch native host (NVIDIA RTX Video settings)",
+  "path": "rtx_hdr_host.exe",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://omgekmljdifpghaimigdbbbcmnjddmdd/"]
+}

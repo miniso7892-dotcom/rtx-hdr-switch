@@ -7,7 +7,7 @@
   --accent: #2e7d32;
   --accent-text: #ffffff;
   --off: #616161;
-  --warn: #b26a00;
+  --warn: #9c5d00;
   --control: #ffffff;
   --control-line: #c9ced6;
   --focus: #1a73e8;
@@ -140,7 +140,7 @@ h2.inline { margin: 0; }
 
 .host { color: var(--muted); font-size: 12px; word-break: break-all; }
 
-select, input[type="time"], input[type="number"] {
+select, input[type="time"], input[type="number"], input[type="text"] {
   font: inherit;
   color: var(--text);
   background: var(--control);
@@ -198,6 +198,10 @@ input:disabled, select:disabled { opacity: .5; }
 
 .switch input:focus-visible + .slider { outline: 2px solid var(--focus); outline-offset: 2px; }
 
+.switch input:disabled, .switch input:disabled + .slider { cursor: default; }
+
+.switch input:disabled + .slider { opacity: .5; }
+
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 .seg { display: inline-flex; border: 1px solid var(--control-line); border-radius: 7px; overflow: hidden; }
@@ -213,6 +217,8 @@ input:disabled, select:disabled { opacity: .5; }
 .seg input:checked + span { background: var(--accent); color: var(--accent-text); }
 
 .seg input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+.seg input:disabled, .seg input:disabled + span { opacity: .5; cursor: default; }
 
 .shortcuts { list-style: none; margin: 0 0 8px; padding: 0; }
 
@@ -232,3 +238,83 @@ input:disabled, select:disabled { opacity: .5; }
 }
 
 .shortcuts .unset { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+.hint { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+
+a { color: var(--focus); }
+
+/* ---------- NVIDIA 设置 ---------- */
+
+.nv-note { margin: 0 0 8px; }
+
+.nv .message { padding: 6px 0; }
+
+.nv-missing { text-align: center; margin: -2px 0 4px; }
+
+.nv-missing a { white-space: nowrap; }
+
+.nv-app-hint { margin: 0 0 6px; }
+
+.nv-label { font-weight: 600; }
+
+.nv-right { display: inline-flex; align-items: center; gap: 10px; }
+
+.nv-state { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+
+.nv-state .dot { width: 8px; height: 8px; }
+
+.nv-state .dot.on { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+
+.nv-sub { margin: 2px 0 2px; }
+
+.nv-reason { color: var(--warn); font-size: 12px; margin: 2px 0 4px; }
+
+.nv-range { margin-top: 6px; }
+
+.nv-range .row { min-height: 26px; }
+
+.nv-range output {
+  min-width: 3.5em;
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.nv-range input[type="number"] { width: 80px; text-align: right; font-variant-numeric: tabular-nums; }
+
+input[type="range"] {
+  display: block;
+  width: 100%;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+input[type="range"]:disabled { cursor: default; }
+
+.nv-hint { color: var(--muted); font-size: 11px; margin-top: 1px; }
+
+.nv-block { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
+
+select.nv-wide { flex: 1; min-width: 0; max-width: 210px; }
+
+.nv-actions { display: flex; gap: 6px; margin-top: 6px; }
+
+.nv-actions .btn { flex: 1 1 auto; white-space: nowrap; }
+
+.nv-save-form { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+
+.nv-save-form input { flex: 1; min-width: 0; }
+
+.nv-save-form .btn { flex: none; }
+
+.nv-msg { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+.nv-msg:empty { display: none; }
+
+.nv-msg.warn { color: var(--warn); }
+
+.row label[for="nv-night-preset"], .row label[for="nv-day-preset"] { flex: none; }
+
+select.nv-pick { flex: 0 1 auto; min-width: 0; max-width: 140px; text-overflow: ellipsis; }

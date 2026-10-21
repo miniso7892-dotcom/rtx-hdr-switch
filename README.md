@@ -6,7 +6,7 @@ A Chrome / Edge extension (Manifest V3) that turns NVIDIA **RTX Video HDR** on o
 
 > **Turning HDR off for a video also turns off RTX Video Super Resolution (VSR) for that video.** This is a Chrome limitation; a web page cannot disable one without the other.
 >
-> **The extension can only turn RTX Video HDR *off*, it cannot turn it on.** RTX Video HDR must be enabled globally in the NVIDIA App; the extension blocks it for the videos you don't want it on.
+> **The per-video switch can only turn RTX Video HDR *off*, it cannot turn it on.** RTX Video HDR must be enabled globally, in the NVIDIA App or, with the optional native host installed, in the popup's [NVIDIA settings panel](#nvidia-settings-panel); the per-video switch blocks it for the videos you don't want it on.
 
 The user interface (popup, on-screen messages) is in Simplified Chinese. The tables below give English translations of the labels.
 
@@ -19,6 +19,7 @@ The user interface (popup, on-screen messages) is in Simplified Chinese. The tab
 - **Night window**: HDR off by default during a time range you choose (e.g. 23:00–07:00, crossing midnight is fine).
 - **Continuous-viewing reminder**: counts the time spent watching with HDR on (across videos, autoplay and tabs) and reminds you to take a break; optionally switches to SDR when the time is up.
 - **Toolbar badge**: green **HDR** / grey **SDR** / dark-yellow **DRM** for the main video of the current tab.
+- **NVIDIA settings panel** (optional, needs a small local helper): change NVIDIA's global RTX Video settings from the popup, save presets, switch presets by time of day. See [NVIDIA settings panel](#nvidia-settings-panel).
 - **No network access, no data collection** (see [Privacy](#privacy)).
 
 ## How it works
@@ -33,7 +34,7 @@ The design notes and the Chromium source references are in [SPEC.md](SPEC.md) (C
 
 ## Requirements
 
-- An NVIDIA RTX GPU with **RTX Video HDR enabled globally**: NVIDIA App → **System** → **Video** → **RTX Video Enhancement** → HDR (Super Resolution is optional).
+- An NVIDIA RTX GPU with **RTX Video HDR enabled globally**: NVIDIA App → **System** → **Video** → **RTX Video Enhancement** → HDR (Super Resolution is optional), or the HDR switch in the popup's [NVIDIA settings panel](#nvidia-settings-panel).
 - Windows HDR turned on: Settings → System → Display → **Use HDR**.
 - Hardware acceleration enabled in the browser (restart the browser after changing it):
   - Chrome: `chrome://settings/system` → **Use graphics acceleration when available**
@@ -69,7 +70,7 @@ Notes:
 
 The badge only tells you whether the extension is blocking RTX Video HDR; it can't tell whether NVIDIA is actually processing the video. Check once like this:
 
-1. Open NVIDIA App → **System** → **Video** and put it next to the browser.
+1. Open NVIDIA App → **System** → **Video** and put it next to the browser. (NVIDIA App doesn't refresh this page by itself: if you change settings in the popup's NVIDIA section meanwhile, leave and re-enter the Video page before you read or move anything there. See [Good to know](#good-to-know).)
 2. Play an ordinary (not DRM-protected) video, e.g. on YouTube or Bilibili. Windowed playback is fine.
 3. Under RTX Video Enhancement, the HDR **Status** should be active while the extension shows **HDR**.
 4. Press `Alt+H` (or click 切换 / *Toggle* in the popup). Within a few seconds the status should go inactive and whites in the video should get visibly dimmer.
@@ -95,6 +96,7 @@ If the status is inactive from the start, RTX Video HDR itself isn't working and
 | `Alt+H` | Toggle RTX Video HDR for the current video (counts as a manual choice; remembered by default) |
 | `Alt+Shift+H` | Turn white-background detection on/off |
 | not set | Forget the current video's remembered choice |
+| not set | Apply the next NVIDIA preset (needs the [native host](#install-the-native-host)) |
 
 Shortcuts only work while a browser window has focus. Change them from the popup (修改快捷键 / *Change shortcuts*) or at `chrome://extensions/shortcuts` (`edge://extensions/shortcuts` in Edge). If another extension already uses a key, the browser may not assign it; set it there by hand.
 
@@ -105,9 +107,10 @@ When the state changes, a small label appears in the top-left corner of the vide
 | Section | What it does |
 |---|---|
 | 当前视频 *Current video* | HDR on/off and the reason, 切换 *Toggle* and 清除此视频记忆 *Forget this video* buttons, the video's key, and the last measured brightness / white ratio |
+| NVIDIA 视频设置（全局） *NVIDIA video settings (global)* | NVIDIA's global RTX Video settings and presets, see [NVIDIA settings panel](#nvidia-settings-panel) |
 | 本网站 *This site* | 跟随规则 *Follow rules* / 总是开 HDR *Always on* / 总是关 HDR *Always off* |
 | 自动检测白底/高亮视频 *Auto-detect white/bright videos* | 关闭 *Off* / 只自动关闭 *Turn off only* (recommended) / 自动开关 *Turn off and on*; sensitivity 低 / 中 / 高 *low / medium / high* |
-| 夜间护眼 *Night mode* | HDR off by default within a time range |
+| 夜间护眼 *Night mode* | HDR off by default within a time range; NVIDIA presets to apply in and outside that range |
 | 连续观看提醒 *Viewing reminder* | Minutes of HDR viewing before a break reminder (0 = off); 到时自动切回 SDR *switch to SDR when time is up* |
 | 默认 *Default* | On or off when no rule applies |
 | 其他 *Other* | Remember manual choices per video; show on-screen labels |
@@ -142,10 +145,43 @@ The main video is sampled as soon as it starts playing and then every 1.5 s, sca
 - When time is up, a message on the video suggests a break, and the count restarts.
 - With *switch to SDR when time is up* checked, the current video and every following video (next video, other tabs) stay in SDR until you stop watching for over 5 minutes, switch HDR back on manually (`Alt+H` or the popup), or turn the option off.
 
+## NVIDIA settings panel
+
+[简体中文说明](README.zh-CN.md#nvidia-参数面板)
+
+Version 1.1.0 adds a section 「NVIDIA 视频设置（全局）」 (*NVIDIA video settings (global)*) to the popup. It reads and changes the same global settings that NVIDIA App shows under **System** → **Video** → **RTX Video Enhancement**, so changes apply to every video, in every browser and app, not only the current tab:
+
+- **HDR** on/off with NVIDIA's active/inactive status, **peak brightness**, **middle grey**, **contrast** and **saturation**.
+- **Super Resolution**: off / auto / manual quality (very low to high), **GPU priority** in auto mode, and the on-video status indicator.
+- **Presets**: save the current values under a name, apply them later, delete them (deleting asks for a second click).
+- **Day/night presets**: under 夜间护眼 (*Night mode*), choose a preset for the night window (夜间套用 NVIDIA 预设) and one for the rest of the day (其余时间套用). They follow the night window's times whether or not Night mode itself is on, and are applied once when the period starts; changes you make afterwards are kept until the next period.
+- **Shortcut** 切换到下一个 NVIDIA 预设 (*apply the next NVIDIA preset*). No key is assigned by default; set one on the shortcuts page.
+
+Unlike the per-video switch, which can only block HDR for one video, this panel switches NVIDIA's global RTX Video HDR on and off.
+
+### Install the native host
+
+A browser extension can't call NVIDIA's settings interface directly, so the panel talks to a small helper program (a native messaging host) in the `native-host` folder. Without it the panel shows 未安装本地组件 (*native host not installed*) and the rest of the extension works as before.
+
+1. Install the extension from this folder (see [Installation](#installation)). Load the folder as it is: the `key` in `manifest.json` fixes the extension ID to `omgekmljdifpghaimigdbbbcmnjddmdd`, and the helper only accepts that ID.
+2. Double-click `native-host\install.cmd`. It builds `rtx_hdr_host.exe` with the C# compiler that comes with Windows (.NET Framework 4.x) and registers it for Chrome, Edge and Chromium for the current user (`HKCU`). No admin rights are needed.
+3. Close and reopen the popup. The NVIDIA section should now show the current values.
+
+Requirements: Windows 10/11 (x64) and NVIDIA App, whose `nvcpl.dll` the helper uses. Keep the folder on a path without `&`, `^` or `%`: the browser starts the helper through `cmd.exe`, which breaks on these characters.
+
+To uninstall, double-click `native-host\uninstall.cmd` (it removes the registry entries), then delete the folder. If you move the folder, run `install.cmd` again.
+
+### Good to know
+
+- **NVIDIA App shows the old values until you leave its Video page and open it again.** While that page shows old values, don't move its sliders: NVIDIA App writes back everything it has on screen and undoes the popup's changes.
+- The helper uses NVIDIA App's own `nvcpl.dll` through an undocumented interface. It was tested with NVIDIA App 11.0.9 and driver 617.42; a later NVIDIA App update may break it. The popup then shows an error and the rest of the extension keeps working.
+- Peak brightness above about 1000 nits made no difference in testing: driver 617.42 capped the output at about 1000 nits. The popup shows a hint when you go above 1000.
+- The helper runs only while the popup is open, or for a moment when a preset is applied. It runs locally and makes no network connections.
+
 ## Limitations
 
 - **Turning HDR off also turns off VSR** for that video (Chrome limitation, see above).
-- **It can only turn RTX Video HDR off.** If RTX Video HDR is not enabled globally in the NVIDIA App, or hardware acceleration is off, there is no HDR to switch, even when the badge says **HDR**.
+- **The per-video switch can only turn RTX Video HDR off.** If RTX Video HDR is not enabled globally (in the NVIDIA App or the popup's [NVIDIA settings panel](#nvidia-settings-panel)), or hardware acceleration is off, there is no HDR to switch, even when the badge says **HDR**.
 - **DRM-protected videos can't be controlled.** They are presented through a Media Foundation overlay that CSS doesn't affect, and their frames can't be read for detection. The badge shows **DRM**. They still count towards the viewing reminder.
 - **Picture-in-Picture**: the browser sends the video straight to the PiP window, so the switch may not apply there. It works again once the video is back in the page.
 - **Cross-origin videos without CORS** can't be sampled, so auto-detection doesn't work for them. Manual toggling, memory and site rules still work.
@@ -165,6 +201,11 @@ The main video is sampled as soon as it starts playing and then every 1.5 s, sca
 | Shortcut does nothing | Check that a key is assigned on the shortcuts page and doesn't clash with another extension, and that the browser window has focus. |
 | A white-background video isn't switched off | Make sure detection isn't set to *Off* and no higher-priority rule applies; try a higher sensitivity. Cross-origin videos can't be detected. |
 | Extension stops working / "could not load" | Check that the `rtx-hdr-switch` folder hasn't been moved or deleted. |
+| NVIDIA section says 未安装本地组件 (*native host not installed*) | Run `native-host\install.cmd` (see [Install the native host](#install-the-native-host)), then reopen the popup. Run it again after moving the folder. |
+| NVIDIA section says 本地组件只接受仓库里这份扩展 (*the helper only accepts this repository's extension*) | The extension ID doesn't match. Load this folder unpacked as it is; a copy without the `key` in `manifest.json`, or a repacked copy, gets a different ID. Running `install.cmd` again doesn't help. |
+| NVIDIA section says 未找到 NVIDIA App（nvcpl.dll） (*NVIDIA App not found*) | Install NVIDIA App. |
+| NVIDIA section says 本地组件版本不匹配 (*helper version mismatch*) | After updating the extension, run `native-host\install.cmd` again. |
+| NVIDIA App still shows the old values | Leave NVIDIA App's Video page and open it again (see [Good to know](#good-to-know)). |
 
 ## Development
 
@@ -173,6 +214,9 @@ No build step and no dependencies. The tests use only Node's built-in `node:asse
 ```sh
 node test/lib.test.js        # unit tests: decisions, video keys, auto-detection, filter stacking, viewing timer, settings, manifest
 python tools/make_icons.py   # regenerate icons/ (needs Pillow)
+native-host\build.cmd                      # build rtx_hdr_host.exe (in-box C# 5 compiler)
+node native-host/test/host.test.mjs        # native host tests (read-only)
+node native-host/test/host.test.mjs --live # plus one reversible write (middle grey +1, then restored)
 ```
 
 | File | Purpose |
@@ -182,6 +226,7 @@ python tools/make_icons.py   # regenerate icons/ (needs Pillow)
 | `lib.js` | Pure logic shared by the content script, popup, service worker and tests |
 | `content.js` | Content script: finds videos, applies the filter, samples frames, on-screen labels |
 | `popup.html` / `popup.css` / `popup.js` | Popup |
+| `native-host/` | Native messaging host for the NVIDIA settings panel: `RtxHdrHost.cs`, build / install / uninstall scripts, host manifest, tests |
 | `SPEC.md` | Design spec and measurements (Chinese) |
 
 ### Permissions
@@ -191,11 +236,13 @@ python tools/make_icons.py   # regenerate icons/ (needs Pillow)
 | `storage` | Settings, remembered videos and per-tab state |
 | `scripting` | Inject the content script into tabs that were already open when the extension was installed or updated |
 | `tabs` | Look up open tabs and their URLs (injection on install, shortcuts, popup, badge) |
+| `nativeMessaging` | Talk to the optional local helper that reads and writes NVIDIA's RTX Video settings |
+| `alarms` | Check once a minute whether a day/night NVIDIA preset is due (only while one is selected) |
 | `<all_urls>` | Videos can be on any site, including embedded players in iframes |
 
 ## Privacy
 
-The extension makes no network requests and collects no data. Settings and remembered videos are stored locally in `chrome.storage.local`; per-tab state and the viewing timer live in `chrome.storage.session` and are cleared when the browser restarts. Auto-detection scales the video frame down to 64×36 in memory to measure brightness; frames are never stored or sent anywhere.
+The extension makes no network requests and collects no data. Settings and remembered videos are stored locally in `chrome.storage.local`; per-tab state and the viewing timer live in `chrome.storage.session` and are cleared when the browser restarts. Auto-detection scales the video frame down to 64×36 in memory to measure brightness; frames are never stored or sent anywhere. The optional native host runs only on your PC, talks only to the extension and to NVIDIA App's `nvcpl.dll`, and makes no network connections.
 
 ## License
 

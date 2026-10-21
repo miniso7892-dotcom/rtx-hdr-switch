@@ -609,6 +609,358 @@ test('护眼：存储格式与提醒文案', () => {
   assert.equal(L.reasonText('contested'), '页面不断改写视频样式，无法关闭');
 });
 
+// ---------- NVIDIA 设置 ----------
+
+// 规格里的示例 State（本机基线）
+const NV_STATE = Object.freeze({
+  hdr: { supported: true, enabled: true, active: false, error: 0, peak: 1000, peakMin: 400, peakMax: 1970, middleGrey: 65, contrast: 25, saturation: 0 },
+  vsr: { supported: true, mode: 5, level: 0, priority: 2 },
+  indicator: false,
+  flags: 0
+});
+const nvState = (patch) => {
+  const s = JSON.parse(JSON.stringify(NV_STATE));
+  if (patch && patch.hdr) Object.assign(s.hdr, patch.hdr);
+  if (patch && patch.vsr) Object.assign(s.vsr, patch.vsr);
+  return s;
+};
+const preset = (id, name, extra) => Object.assign({ id: id, name: name, hdr: { peak: 1000, middleGrey: 50, contrast: 0, saturation: 0 } }, extra);
+
+test('NV 常量', () => {
+  assert.equal(L.NV_HOST, 'io.github.rtx_hdr_switch');
+  assert.ok(/^[a-z0-9._]+$/.test(L.NV_HOST), '本地组件名只能用 [a-z0-9._]');
+  assert.equal(L.NV_PROTOCOL, 1);
+  assert.equal(L.NV_MAX_PRESETS, 20);
+  assert.deepEqual(L.NV_RANGES.hdr.middleGrey, { min: 10, max: 100 });
+  assert.deepEqual(L.NV_RANGES.hdr.contrast, { min: -100, max: 100 });
+  assert.deepEqual(L.NV_RANGES.hdr.saturation, { min: -100, max: 100 });
+  assert.deepEqual(L.NV_RANGES.hdr.peak, { min: 400, max: 10000 });
+  assert.deepEqual(L.NV_RANGES.vsr.mode, { min: 0, max: 5 });
+  assert.deepEqual(L.NV_RANGES.vsr.priority, { min: 0, max: 2 });
+  assert.ok(Object.isFrozen(L.NV_RANGES.hdr.peak));
+});
+
+test('mergeSettings: nv 默认值', () => {
+  const m = L.mergeSettings(null);
+  assert.deepEqual(m.nv, { presets: [], nightPresetId: null, dayPresetId: null });
+  assert.deepEqual(L.mergeSettings({ nv: 'x' }).nv, m.nv);
+  assert.deepEqual(L.mergeSettings({ nv: { presets: 'x', nightPresetId: 5 } }).nv, m.nv);
+  // 不共享默认对象
+  m.nv.presets.push(1);
+  assert.deepEqual(L.mergeSettings(null).nv.presets, []);
+  assert.ok(Object.isFrozen(L.DEFAULT_SETTINGS.nv.presets));
+});
+
+test('mergeSettings: nv 预设规范化', () => {
+  const m = L.mergeSettings({
+    nv: {
+      presets: [
+        { id: 'a', name: '  夜间  ', hdr: { enabled: false, peak: 99999, middleGrey: 5, contrast: -500, saturation: '30' }, vsr: { mode: 9, priority: -1 }, junk: 1 },
+        { id: 'b', name: 'x', hdr: { peak: 650.4, middleGrey: 100.6, contrast: 12.5, saturation: -100 } },
+        { id: 'c', name: 'vsr 不完整', hdr: { peak: 800, middleGrey: 50, contrast: 0, saturation: 0 }, vsr: { mode: 2 } },
+        { id: 'd', name: 'enabled 不是布尔', hdr: { enabled: 1, peak: 800, middleGrey: 50, contrast: 0, saturation: 0 } },
+        { id: 'e', name: 'vsr 没有 mode', hdr: { peak: 800, middleGrey: 50, contrast: 0, saturation: 0 }, vsr: { priority: 1 } }
+      ],
+      nightPresetId: 'a',
+      dayPresetId: 'b'
+    }
+  });
+  const [a, b, c, d, e] = m.nv.presets;
+  assert.ok(!('vsr' in e), '没有 mode 的 vsr 去掉');
+  assert.deepEqual(a, { id: 'a', name: '夜间', hdr: { enabled: false, peak: 10000, middleGrey: 10, contrast: -100, saturation: 30 }, vsr: { mode: 5, priority: 0 } });
+  assert.deepEqual(b, { id: 'b', name: 'x', hdr: { peak: 650, middleGrey: 100, contrast: 13, saturation: -100 } });
+  assert.deepEqual(c.vsr, { mode: 2 }, 'vsr 可以没有 priority（驱动没有 GPU 优先级）');
+  assert.ok(!('enabled' in d.hdr), '非布尔的 enabled 去掉');
+  assert.equal(m.nv.nightPresetId, 'a');
+  assert.equal(m.nv.dayPresetId, 'b');
+  assert.equal(L.mergeSettings({ nv: { presets: [preset('a', 'x', { hdr: { peak: 1, middleGrey: 50, contrast: 0, saturation: 0 } })] } }).nv.presets[0].hdr.peak, 400);
+  // 规范化是幂等的
+  assert.deepEqual(L.mergeSettings(m), m);
+});
+
+test('mergeSettings: nv 预设名称、id、数量和引用', () => {
+  const bad = [
+    null, 'x', [], { id: 'a', name: 'x' }, // 没有 hdr
+    preset('', 'x'), preset('has space', 'x'), preset('a'.repeat(41), 'x'), preset(5, 'x'), // id 不合法
+    preset('n1', ''), preset('n2', '   '), preset('n3', 7), // 名称为空或不是字符串
+    preset('m1', 'x', { hdr: { peak: 1000, middleGrey: 'abc', contrast: 0, saturation: 0 } }),
+    preset('m2', 'x', { hdr: { peak: 1000, middleGrey: 50, contrast: 0 } }),
+    preset('m3', 'x', { hdr: { peak: NaN, middleGrey: 50, contrast: 0, saturation: 0 } })
+  ];
+  assert.deepEqual(L.mergeSettings({ nv: { presets: bad } }).nv.presets, []);
+
+  // 名称最多 24 个字符（按码点，不拆 emoji）
+  const long = L.mergeSettings({ nv: { presets: [preset('a', '一二三四五六七八九十一二三四五六七八九十一二三四五六七八'), preset('b', '😀'.repeat(30))] } }).nv.presets;
+  assert.equal(long[0].name, '一二三四五六七八九十一二三四五六七八九十一二三四');
+  assert.equal(Array.from(long[1].name).length, 24);
+  assert.equal(long[1].name, '😀'.repeat(24));
+
+  // 重复 id 只保留第一个；最多 20 个
+  const many = [];
+  for (let i = 0; i < 30; i++) many.push(preset('p' + i, '预设 ' + i));
+  many.splice(1, 0, preset('p0', '重复'));
+  const n = L.mergeSettings({ nv: { presets: many, nightPresetId: 'p25', dayPresetId: 'p19' } }).nv;
+  assert.equal(n.presets.length, 20);
+  assert.equal(n.presets[0].name, '预设 0');
+  assert.equal(n.presets[1].id, 'p1');
+  assert.equal(n.nightPresetId, null, '第 21 个以后被截掉的预设不能被引用');
+  assert.equal(n.dayPresetId, 'p19');
+
+  // 指向不存在的预设变回 null
+  const r = L.mergeSettings({ nv: { presets: [preset('a', 'x')], nightPresetId: 'zzz', dayPresetId: '' } }).nv;
+  assert.equal(r.nightPresetId, null);
+  assert.equal(r.dayPresetId, null);
+  // 不修改输入
+  const input = { nv: { presets: [preset('a', ' x ')] } };
+  const snap = JSON.stringify(input);
+  L.mergeSettings(input);
+  assert.equal(JSON.stringify(input), snap);
+});
+
+test('nvNormState', () => {
+  assert.deepEqual(L.nvNormState(NV_STATE), NV_STATE);
+  assert.notEqual(L.nvNormState(NV_STATE).hdr, NV_STATE.hdr, '返回新对象');
+  for (const bad of [null, undefined, 'x', {}, { hdr: {} }, { vsr: {} }, { hdr: [], vsr: {} }]) assert.equal(L.nvNormState(bad), null);
+  const s = L.nvNormState({ hdr: { supported: 1, enabled: 'yes', error: -3, peak: 1.5, peakMax: 'x' }, vsr: {}, flags: 0x100 });
+  assert.equal(s.hdr.supported, false, '只认 true');
+  assert.equal(s.hdr.enabled, false);
+  assert.equal(s.hdr.error, 0);
+  assert.equal(s.hdr.peakMin, 400);
+  assert.equal(s.hdr.peak, 400);
+  assert.equal(s.hdr.peakMax, 400);
+  assert.equal(s.vsr.mode, 0);
+  assert.equal(s.indicator, true, '没有 indicator 时由 flags & 0x101 推出');
+  assert.equal(s.vsr.priority, null, '没有 0x32F：priority 为 null');
+  // 驱动没有 0x330：本地组件回 indicator / flags 为 null
+  const old = L.nvNormState({ hdr: {}, vsr: { priority: null }, indicator: null, flags: null });
+  assert.equal(old.indicator, null);
+  assert.equal(old.flags, null);
+  assert.equal(old.vsr.priority, null);
+  assert.equal(L.nvNormState({ hdr: {}, vsr: {}, flags: -1 }).flags, null);
+  assert.equal(L.nvNormState({ hdr: {}, vsr: {}, flags: 0x4 }).indicator, false);
+  assert.equal(L.nvNormState({ hdr: {}, vsr: {}, flags: 0x1, indicator: false }).indicator, false, 'indicator 优先');
+  assert.equal(L.nvNormState({ hdr: { error: 2 }, vsr: {} }).hdr.error, 2);
+});
+
+test('nvValidatePatch: 合法的补丁', () => {
+  const full = { hdr: { enabled: true, peak: 1970, middleGrey: 10, contrast: -100, saturation: 100 }, vsr: { mode: 0, priority: 2 }, indicator: true, commit: true };
+  assert.deepEqual(L.nvValidatePatch(full, NV_STATE), { ok: true, patch: full });
+  assert.deepEqual(L.nvValidatePatch({}, NV_STATE), { ok: true, patch: {} });
+  assert.deepEqual(L.nvValidatePatch({ hdr: { peak: 400 } }, NV_STATE), { ok: true, patch: { hdr: { peak: 400 } } });
+  // 未知字段丢掉，空的 hdr/vsr 不写
+  assert.deepEqual(L.nvValidatePatch({ cmd: 'x', hdr: { foo: 1 }, vsr: {}, extra: 1, commit: false }, NV_STATE), { ok: true, patch: { commit: false } });
+  // 不给 state：最高亮度只按 400..10000 检查
+  assert.equal(L.nvValidatePatch({ hdr: { peak: 5000 } }).ok, true);
+  assert.equal(L.nvValidatePatch({ hdr: { peak: 5000 } }, null).ok, true);
+  for (const mode of [0, 1, 2, 3, 4, 5]) assert.equal(L.nvValidatePatch({ vsr: { mode: mode } }, NV_STATE).ok, true, 'mode ' + mode);
+});
+
+test('nvValidatePatch: 每个字段的范围检查（任何一个不合法整个作废）', () => {
+  const cases = [
+    [{ hdr: { peak: 399 } }, 'hdr.peak'],
+    [{ hdr: { peak: 1971 } }, 'hdr.peak'],
+    [{ hdr: { peak: 1000.5 } }, 'hdr.peak'],
+    [{ hdr: { peak: '1000' } }, 'hdr.peak'],
+    [{ hdr: { middleGrey: 9 } }, 'hdr.middleGrey'],
+    [{ hdr: { middleGrey: 101 } }, 'hdr.middleGrey'],
+    [{ hdr: { contrast: -101 } }, 'hdr.contrast'],
+    [{ hdr: { contrast: 101 } }, 'hdr.contrast'],
+    [{ hdr: { saturation: -101 } }, 'hdr.saturation'],
+    [{ hdr: { saturation: NaN } }, 'hdr.saturation'],
+    [{ hdr: { saturation: null } }, 'hdr.saturation'],
+    [{ hdr: { enabled: 1 } }, 'hdr.enabled'],
+    [{ vsr: { mode: -1 } }, 'vsr.mode'],
+    [{ vsr: { mode: 6 } }, 'vsr.mode'],
+    [{ vsr: { priority: 3 } }, 'vsr.priority'],
+    [{ vsr: { priority: 1.5 } }, 'vsr.priority'],
+    [{ indicator: 'yes' }, 'indicator'],
+    [{ commit: 1 }, 'commit'],
+    // 前面合法、后面一个不合法：整个作废
+    [{ hdr: { peak: 1000, middleGrey: 50 }, vsr: { mode: 5, priority: 9 }, commit: true }, 'vsr.priority']
+  ];
+  for (const [patch, field] of cases) {
+    const r = L.nvValidatePatch(patch, NV_STATE);
+    assert.equal(r.ok, false, JSON.stringify(patch));
+    assert.equal(r.error.code, 'range', JSON.stringify(patch));
+    assert.equal(r.error.field, field, JSON.stringify(patch));
+    assert.ok(!('patch' in r));
+  }
+  // 最高亮度按实时范围给出 min/max
+  assert.deepEqual(L.nvValidatePatch({ hdr: { peak: 2000 } }, NV_STATE).error, { code: 'range', field: 'hdr.peak', min: 400, max: 1970 });
+  assert.equal(L.nvValidatePatch({ hdr: { peak: 10001 } }).error.field, 'hdr.peak');
+  // 结构不对
+  for (const bad of [null, 5, 'x', []]) assert.equal(L.nvValidatePatch(bad, NV_STATE).error.code, 'bad-request');
+  assert.deepEqual(L.nvValidatePatch({ hdr: 5 }, NV_STATE).error, { code: 'range', field: 'hdr' }, '与本地组件一致');
+  assert.deepEqual(L.nvValidatePatch({ vsr: [] }, NV_STATE).error, { code: 'range', field: 'vsr' });
+});
+
+test('nvValidatePatch: 不支持 / HDR 出错时拒绝对应部分', () => {
+  const hdrErr = nvState({ hdr: { error: 2 } });
+  assert.deepEqual(L.nvValidatePatch({ hdr: { middleGrey: 50 } }, hdrErr).error, { code: 'hdr-error', errorCode: 2 });
+  assert.deepEqual(L.nvValidatePatch({ hdr: { enabled: false } }, hdrErr).error, { code: 'hdr-error', errorCode: 2 });
+  assert.equal(L.nvValidatePatch({ vsr: { mode: 1 }, indicator: true }, hdrErr).ok, true, 'HDR 出错不影响超分');
+  const noHdr = nvState({ hdr: { supported: false } });
+  assert.deepEqual(L.nvValidatePatch({ hdr: { contrast: 0 } }, noHdr).error, { code: 'unsupported', field: 'hdr' });
+  const noVsr = nvState({ vsr: { supported: false } });
+  assert.deepEqual(L.nvValidatePatch({ vsr: { priority: 0 } }, noVsr).error, { code: 'unsupported', field: 'vsr' });
+  assert.equal(L.nvValidatePatch({ hdr: { contrast: 0 } }, noVsr).ok, true);
+  // 驱动没有 GPU 优先级 / 视频标志位
+  const oldDrv = Object.assign(nvState({ vsr: { priority: null } }), { indicator: null, flags: null });
+  assert.deepEqual(L.nvValidatePatch({ vsr: { mode: 5, priority: 1 } }, oldDrv).error, { code: 'unsupported', field: 'vsr.priority' });
+  assert.deepEqual(L.nvValidatePatch({ indicator: true }, oldDrv).error, { code: 'unsupported', field: 'indicator' });
+  assert.equal(L.nvValidatePatch({ vsr: { mode: 5 }, hdr: { peak: 500 } }, oldDrv).ok, true);
+  // 范围错误优先于不支持
+  assert.equal(L.nvValidatePatch({ hdr: { contrast: 999 } }, noHdr).error.code, 'range');
+});
+
+test('nvMergePatch / nvApplyPatch', () => {
+  assert.equal(L.nvMergePatch(null, undefined), null);
+  assert.deepEqual(L.nvMergePatch(null, { hdr: { peak: 500 } }), { hdr: { peak: 500 } });
+  const a = { hdr: { peak: 500, contrast: 1 }, commit: true };
+  const b = { hdr: { peak: 600 }, vsr: { mode: 1 }, commit: false, indicator: true };
+  const m = L.nvMergePatch(a, b);
+  assert.deepEqual(m, { hdr: { peak: 600, contrast: 1 }, vsr: { mode: 1 }, commit: true, indicator: true });
+  assert.deepEqual(a, { hdr: { peak: 500, contrast: 1 }, commit: true }, '不修改输入');
+  assert.equal(L.nvMergePatch({ commit: false }, { hdr: { peak: 1 } }).commit, false);
+  assert.ok(!('commit' in L.nvMergePatch({ hdr: { peak: 1 } }, { hdr: { peak: 2 } })));
+
+  const s = L.nvApplyPatch(NV_STATE, { hdr: { enabled: false, peak: 1500, saturation: -20, bogus: 1 }, vsr: { mode: 3 }, indicator: true });
+  assert.equal(s.hdr.enabled, false);
+  assert.equal(s.hdr.peak, 1500);
+  assert.equal(s.hdr.saturation, -20);
+  assert.equal(s.hdr.middleGrey, 65);
+  assert.equal(s.vsr.mode, 3);
+  assert.equal(s.vsr.priority, 2);
+  assert.equal(s.indicator, true);
+  assert.equal(s.flags, 0x101);
+  assert.equal(NV_STATE.hdr.peak, 1000, '不修改输入');
+  const off = L.nvApplyPatch(Object.assign({}, NV_STATE, { flags: 0x405, indicator: true }), { indicator: false });
+  assert.equal(off.flags, 0x404, '只清 0x1|0x100，保留其他位');
+  assert.equal(L.nvApplyPatch(null, {}), null);
+  const noFlags = L.nvApplyPatch(Object.assign({}, NV_STATE, { indicator: null, flags: null }), { indicator: true });
+  assert.equal(noFlags.indicator, null, '没有 0x330 时不乐观更新');
+  assert.equal(noFlags.flags, null);
+  assert.deepEqual(L.nvApplyPatch(NV_STATE, null), NV_STATE);
+});
+
+test('nvPresetFromState', () => {
+  const p = L.nvPresetFromState(NV_STATE, '  白天 ', 'p1');
+  assert.deepEqual(p, { id: 'p1', name: '白天', hdr: { enabled: true, peak: 1000, middleGrey: 65, contrast: 25, saturation: 0 }, vsr: { mode: 5, priority: 2 } });
+  assert.ok(!('vsr' in L.nvPresetFromState(nvState({ vsr: { supported: false } }), 'x', 'p2')), '不支持超分时不带 vsr');
+  assert.deepEqual(L.nvPresetFromState(nvState({ vsr: { priority: null } }), 'x', 'p3').vsr, { mode: 5 }, '没有 GPU 优先级时只存 mode');
+  assert.equal(L.nvPresetFromState(NV_STATE, '   ', 'p1'), null);
+  assert.equal(L.nvPresetFromState(NV_STATE, 'x', 'bad id'), null);
+  assert.equal(L.nvPresetFromState(null, 'x', 'p1'), null);
+  // 存进设置后原样保留
+  assert.deepEqual(L.mergeSettings({ nv: { presets: [p] } }).nv.presets[0], p);
+});
+
+test('nvPresetPatch: 套用时按实时范围夹最高亮度、跳过不可用的部分', () => {
+  const p = preset('a', 'x', { hdr: { enabled: false, peak: 5000, middleGrey: 40, contrast: -10, saturation: 15 }, vsr: { mode: 2, priority: 0 } });
+  assert.deepEqual(L.nvPresetPatch(p, NV_STATE), {
+    hdr: { enabled: false, peak: 1970, middleGrey: 40, contrast: -10, saturation: 15 },
+    vsr: { mode: 2, priority: 0 },
+    commit: true
+  });
+  assert.equal(L.nvPresetPatch(preset('a', 'x', { hdr: { peak: 400, middleGrey: 50, contrast: 0, saturation: 0 } }), nvState({ hdr: { peakMin: 500 } })).hdr.peak, 500);
+  assert.ok(!('enabled' in L.nvPresetPatch(preset('a', 'x'), NV_STATE).hdr), '预设没存开关时不动开关');
+  // HDR 出错：只写超分
+  assert.deepEqual(L.nvPresetPatch(p, nvState({ hdr: { error: 1 } })), { vsr: { mode: 2, priority: 0 }, commit: true });
+  assert.deepEqual(L.nvPresetPatch(p, nvState({ vsr: { supported: false } })).vsr, undefined);
+  // 驱动没有 GPU 优先级：不发 priority（否则整个请求会被本地组件拒绝）
+  assert.deepEqual(L.nvPresetPatch(p, nvState({ vsr: { priority: null } })).vsr, { mode: 2 });
+  assert.deepEqual(L.nvPresetPatch(preset('a', 'x', { vsr: { mode: 1 } }), NV_STATE).vsr, { mode: 1 });
+  // 什么都写不了
+  assert.equal(L.nvPresetPatch(preset('a', 'x'), nvState({ hdr: { supported: false } })), null);
+  assert.equal(L.nvPresetPatch(null, NV_STATE), null);
+  assert.equal(L.nvPresetPatch(p, null), null);
+  // 结果一定能通过校验
+  for (const st of [NV_STATE, nvState({ hdr: { peakMax: 600 } }), nvState({ hdr: { error: 3 } }), nvState({ vsr: { priority: null } })]) {
+    assert.equal(L.nvValidatePatch(L.nvPresetPatch(p, st), st).ok, true);
+  }
+});
+
+test('nvSchedulePhase: 与夜间护眼开关无关', () => {
+  const n = { enabled: false, start: '23:00', end: '07:00' };
+  const at = (h, m) => L.nvSchedulePhase(n, h * 60 + m);
+  assert.equal(at(22, 59), 'day');
+  assert.equal(at(23, 0), 'night');
+  assert.equal(at(3, 0), 'night');
+  assert.equal(at(6, 59), 'night');
+  assert.equal(at(7, 0), 'day');
+  assert.equal(L.nvSchedulePhase({ enabled: true, start: '13:00', end: '14:00' }, 13 * 60 + 30), 'night');
+  assert.equal(L.nvSchedulePhase({ start: '13:00', end: '14:00' }, 14 * 60), 'day');
+  assert.equal(L.nvSchedulePhase({ start: '10:00', end: '10:00' }, 10 * 60), 'day', '空时段');
+  assert.equal(L.nvSchedulePhase(null, 0), 'day');
+  assert.equal(L.nvSchedulePhase(L.mergeSettings(null).night, new Date(2026, 0, 1, 23, 30)), 'night', '也接受 Date');
+  assert.equal(L.nvSchedulePhase(L.mergeSettings(null).night, new Date(2026, 0, 1, 12, 0)), 'day');
+});
+
+test('nvNextPresetId / nvDefaultPresetName', () => {
+  const ps = [preset('a', '预设 1'), preset('b', '预设 3'), preset('c', 'x')];
+  assert.equal(L.nvNextPresetId(ps, 'a'), 'b');
+  assert.equal(L.nvNextPresetId(ps, 'b'), 'c');
+  assert.equal(L.nvNextPresetId(ps, 'c'), 'a', '循环');
+  assert.equal(L.nvNextPresetId(ps, null), 'a');
+  assert.equal(L.nvNextPresetId(ps, 'gone'), 'a');
+  assert.equal(L.nvNextPresetId([preset('a', 'x')], 'a'), 'a');
+  assert.equal(L.nvNextPresetId([], 'a'), null);
+  assert.equal(L.nvNextPresetId(null, 'a'), null);
+  assert.equal(L.nvDefaultPresetName(ps), '预设 2');
+  assert.equal(L.nvDefaultPresetName([]), '预设 1');
+  assert.equal(L.nvDefaultPresetName(null), '预设 1');
+});
+
+test('NV 错误文案', () => {
+  assert.equal(L.nvHdrErrorText(1), '未检测到活动的 HDR10 显示器。');
+  assert.equal(L.nvHdrErrorText(2), 'Windows 显示设置中未开启 HDR。');
+  assert.equal(L.nvHdrErrorText(3), '禁用 Surround 以使用 HDR');
+  assert.equal(L.nvHdrErrorText(0), '');
+  assert.equal(L.nvHdrErrorText(9), 'HDR 不可用（错误 9）');
+  assert.deepEqual(L.nvPortError('Specified native messaging host not found.'),
+    { ok: false, error: { code: 'host-missing', message: 'Specified native messaging host not found.' } });
+  assert.equal(L.nvPortError('Access to the specified native messaging host is forbidden.').error.code, 'host-forbidden');
+  assert.equal(L.nvPortError('Native host has exited.').error.code, 'host-exit');
+  assert.deepEqual(L.nvPortError(undefined), { ok: false, error: { code: 'host-exit' } });
+  assert.equal(L.nvPortError('Error when communicating with the native messaging host.').error.code, 'host-error');
+  assert.equal(L.nvErrorText({ code: 'host-missing' }), '未安装本地组件，无法读写 NVIDIA 设置。');
+  assert.equal(L.nvErrorText('host-missing'), '未安装本地组件，无法读写 NVIDIA 设置。');
+  assert.equal(L.nvErrorText({ code: 'hdr-error', errorCode: 2 }), 'Windows 显示设置中未开启 HDR。');
+  assert.equal(L.nvErrorText({ code: 'api', rc: -5, id: '0x318' }), 'NVIDIA 接口调用失败（rc=-5）。');
+  assert.equal(L.nvErrorText({ code: 'range', field: 'hdr.peak' }), '数值超出范围（最高亮度）。');
+  assert.equal(L.nvErrorText({ code: 'unsupported', field: 'vsr' }), '此显卡或驱动不支持 RTX 视频超分辨率。');
+  assert.equal(L.nvErrorText({ code: 'unsupported', field: 'vsr.priority' }), '此驱动不支持 GPU 优先级设置。');
+  assert.equal(L.nvErrorText({ code: 'unsupported', field: 'indicator' }), '此驱动不支持状态指示器设置。');
+  assert.equal(L.nvErrorText({ code: 'internal', message: 'NullReferenceException' }), '本地组件内部错误。');
+  assert.equal(L.nvErrorText({ code: 'weird' }), '未知错误（weird）。');
+  assert.equal(L.nvErrorText(null), '未知错误。');
+  for (const c of ['host-missing', 'host-forbidden', 'host-exit', 'host-error', 'timeout', 'protocol', 'no-dll', 'init', 'api', 'range', 'unsupported', 'hdr-error', 'bad-request', 'internal']) {
+    assert.ok(!/未知错误/.test(L.nvErrorText({ code: c })), c);
+  }
+});
+
+// ---------- 弹窗 ----------
+
+test('popup.js 用到的元素 id 在 popup.html 里都有', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
+  const js = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
+  const ids = new Set(Array.from(html.matchAll(/\bid="([^"]+)"/g), (m) => m[1]));
+  const used = new Set(Array.from(js.matchAll(/\$\('([^']+)'\)/g), (m) => m[1]));
+  // 拼出来的 id：滑块和它们的读数
+  for (const f of ['peak', 'middleGrey', 'contrast', 'saturation']) used.add('nv-' + f);
+  for (const f of ['middleGrey', 'contrast', 'saturation']) used.add('nv-' + f + '-out');
+  for (const id of used) assert.ok(ids.has(id), '缺少 #' + id);
+  // 每个表单控件都有可访问的名称
+  for (const m of html.matchAll(/<(input|select)\b([^>]*)>/g)) {
+    const attrs = m[2];
+    const id = (/\bid="([^"]+)"/.exec(attrs) || [])[1];
+    const labelled = /aria-label(ledby)?=/.test(attrs) || (id && html.includes('for="' + id + '"'));
+    const wrapped = /type="(radio|checkbox)"/.test(attrs); // 包在 <label> 里
+    assert.ok(labelled || wrapped, '控件没有标签：' + m[0]);
+  }
+  assert.ok(html.includes('https://github.com/miniso7892-dotcom/rtx-hdr-switch#nvidia-settings-panel'));
+});
+
 // ---------- 纯度 ----------
 
 test('lib.js 不引用 chrome / document / window', () => {
@@ -628,9 +980,9 @@ test('manifest.json 合法且引用的文件都存在', () => {
   assert.equal(manifest.name, 'HDR Switch for RTX Video');
   assert.ok(manifest.name.length <= 75, 'name 不超过 75 字符');
   assert.equal(new URL(manifest.homepage_url).protocol, 'https:', 'homepage_url 是合法的 https 网址');
-  assert.equal(manifest.version, '1.0.0');
+  assert.equal(manifest.version, '1.1.0');
   assert.equal(manifest.minimum_chrome_version, '116');
-  assert.deepEqual(manifest.permissions.slice().sort(), ['scripting', 'storage', 'tabs']);
+  assert.deepEqual(manifest.permissions.slice().sort(), ['alarms', 'nativeMessaging', 'scripting', 'storage', 'tabs']);
   assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
   assert.ok(manifest.description.length <= 132, 'description 不超过 132 字符');
 
@@ -643,6 +995,8 @@ test('manifest.json 合法且引用的文件都存在', () => {
   assert.equal(manifest.commands['toggle-hdr'].suggested_key.default, 'Alt+H');
   assert.equal(manifest.commands['toggle-auto'].suggested_key.default, 'Alt+Shift+H');
   assert.ok(!manifest.commands['forget-video'].suggested_key);
+  assert.ok(!manifest.commands['nv-next-preset'].suggested_key, '下一个 NVIDIA 预设：不预设快捷键');
+  assert.equal(manifest.commands['nv-next-preset'].description, '切换到下一个 NVIDIA 预设');
 
   const files = new Set([manifest.background.service_worker, manifest.action.default_popup]);
   for (const c of manifest.content_scripts) for (const f of c.js || []) files.add(f);
@@ -650,7 +1004,7 @@ test('manifest.json 合法且引用的文件都存在', () => {
   for (const f of Object.values(manifest.action.default_icon)) files.add(f);
   // popup.html 里引用的脚本和样式
   const html = fs.readFileSync(path.join(ROOT, manifest.action.default_popup), 'utf8');
-  for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) files.add(m[1]);
+  for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) if (!/^[a-z][a-z0-9+.-]*:/i.test(m[1])) files.add(m[1]); // 跳过外部链接
   for (const f of files) assert.ok(fs.existsSync(path.join(ROOT, f)), '缺少文件 ' + f);
 
   // 图标尺寸与文件名一致（PNG IHDR）

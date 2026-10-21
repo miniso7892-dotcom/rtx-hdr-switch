@@ -100,6 +100,7 @@
   let lastReportAt = 0;
   let everReported = false;
   let osdEl = null;
+  let osdText = null; // 放文字的 closed shadow root（不支持时就是 osdEl 本身）
   let osdHideTimer = 0;
   let osdRemoveTimer = 0;
 
@@ -668,7 +669,11 @@
     if (!force && !settings.osd) return;
     const root = document.documentElement;
     if (!root) return;
-    if (!osdEl) osdEl = document.createElement('rtx-hdr-osd');
+    if (!osdEl) {
+      osdEl = document.createElement('rtx-hdr-osd');
+      // 文字放进 closed shadow root：页面脚本读不到提示内容（预设名、错误详情等）
+      try { osdText = osdEl.attachShadow({ mode: 'closed' }); } catch (e) { osdText = osdEl; }
+    }
     const parent = osdParent() || root;
     const vw = window.innerWidth;
     let left = 16;
@@ -685,7 +690,7 @@
     const wrap = force ? 'white-space:normal !important;' : 'white-space:nowrap !important;text-overflow:ellipsis !important;';
     osdEl.style.cssText = OSD_CSS + wrap + 'max-width:' + maxW + 'px !important;left:' + Math.round(left) +
       'px !important;top:' + Math.round(top) + 'px !important;opacity:1 !important;';
-    osdEl.textContent = text;
+    osdText.textContent = text;
     if (osdEl.parentNode !== parent) parent.appendChild(osdEl);
     clearTimeout(osdHideTimer);
     clearTimeout(osdRemoveTimer);
@@ -933,10 +938,16 @@
 
   function onMessage(msg, sender, sendResponse) {
     if (destroyed || !msg || typeof msg !== 'object' || (sender && sender.id !== runtime.id)) return false;
-    if (msg.type !== 'get-state' && msg.type !== 'command' && msg.type !== 'set-state') return false;
+    if (msg.type !== 'get-state' && msg.type !== 'command' && msg.type !== 'set-state' && msg.type !== 'osd') return false;
     try {
       if (msg.type === 'get-state') evaluate(false);
-      else if (msg.type === 'command') {
+      else if (msg.type === 'osd') {
+        // background 的提示（切换 NVIDIA 预设）：显示在主视频上，没有视频时在左上角；
+        // 失败等需要注意的（warn）关了屏幕提示也显示，显示更久、允许换行
+        if (typeof msg.text === 'string' && msg.text) {
+          showOsd(msg.text.slice(0, 200), msg.warn ? EYE_OSD_MS : OSD_MS, primary, !!msg.warn);
+        }
+      } else if (msg.type === 'command') {
         if (msg.command === 'toggle-hdr') toggleHdr();
         else if (msg.command === 'toggle-auto') toggleAuto();
         else if (msg.command === 'forget-video') forgetVideo();

@@ -33,6 +33,104 @@
     <div class="message" id="video-message" aria-live="polite">正在读取当前页面…</div>
   </section>
 
+  <section class="group nv" aria-labelledby="nv-title">
+    <h2 id="nv-title" class="inline">NVIDIA 视频设置（全局）</h2>
+    <p class="note nv-note">直接改 NVIDIA App 里的 RTX 视频增强设置，对所有视频生效</p>
+
+    <div class="message" id="nv-message" aria-live="polite">正在连接本地组件…</div>
+    <div class="nv-missing" id="nv-missing" hidden>
+      <a id="nv-install" href="https://github.com/miniso7892-dotcom/rtx-hdr-switch#nvidia-settings-panel" target="_blank" rel="noopener">安装方法</a>
+    </div>
+
+    <div id="nv-panel" hidden>
+      <p class="hint nv-app-hint">NVIDIA App 开着时，要离开再进入它的「视频」页才会显示新值；在旧页面上调整会把这里的修改改回去。</p>
+      <div class="row">
+        <span class="nv-label" id="nv-hdr-label">HDR</span>
+        <span class="nv-right">
+          <span class="nv-state"><span class="dot" id="nv-hdr-dot" aria-hidden="true"></span><span id="nv-hdr-state">状态：未激活</span></span>
+          <label class="switch" title="RTX 视频 HDR 开/关">
+            <input type="checkbox" id="nv-hdr" role="switch" aria-labelledby="nv-hdr-label" aria-describedby="nv-hdr-state">
+            <span class="slider" aria-hidden="true"></span>
+          </label>
+        </span>
+      </div>
+      <div class="nv-reason" id="nv-hdr-reason" role="status" hidden></div>
+
+      <div class="nv-range" id="nv-peak-wrap">
+        <div class="row">
+          <label for="nv-peak-num">最高亮度（尼特）</label>
+          <input type="number" id="nv-peak-num" step="1" inputmode="numeric">
+        </div>
+        <input type="range" id="nv-peak" step="10" aria-label="最高亮度（尼特）">
+        <div class="nv-hint" id="nv-peak-hint" hidden>实测驱动输出上限约 1000 尼特</div>
+      </div>
+      <div class="nv-range">
+        <div class="row">
+          <label for="nv-middleGrey">中间灰（尼特）</label>
+          <output id="nv-middleGrey-out" for="nv-middleGrey" aria-hidden="true"></output>
+        </div>
+        <input type="range" id="nv-middleGrey" min="10" max="100" step="1">
+      </div>
+      <div class="nv-range">
+        <div class="row">
+          <label for="nv-contrast">对比度 (%)</label>
+          <output id="nv-contrast-out" for="nv-contrast" aria-hidden="true"></output>
+        </div>
+        <input type="range" id="nv-contrast" min="-100" max="100" step="1">
+      </div>
+      <div class="nv-range">
+        <div class="row">
+          <label for="nv-saturation">饱和度 (%)</label>
+          <output id="nv-saturation-out" for="nv-saturation" aria-hidden="true"></output>
+        </div>
+        <input type="range" id="nv-saturation" min="-100" max="100" step="1">
+      </div>
+
+      <div class="nv-block">
+        <div class="row">
+          <label for="nv-vsr">超分辨率</label>
+          <select id="nv-vsr" aria-describedby="nv-vsr-state">
+            <option value="0">关</option>
+            <option value="5">自动</option>
+            <option value="1">手动·非常低</option>
+            <option value="2">手动·低</option>
+            <option value="3">手动·中</option>
+            <option value="4">手动·高</option>
+          </select>
+        </div>
+        <div class="nv-state nv-sub"><span class="dot" id="nv-vsr-dot" aria-hidden="true"></span><span id="nv-vsr-state">状态：未激活</span></div>
+        <div class="nv-reason" id="nv-vsr-reason" role="status" hidden></div>
+        <div class="row" id="nv-priority-row">
+          <span id="nv-priority-label">GPU 优先级</span>
+          <span class="seg" role="radiogroup" aria-labelledby="nv-priority-label">
+            <label><input type="radio" name="nv-priority" value="0"><span>低</span></label>
+            <label><input type="radio" name="nv-priority" value="1"><span>中</span></label>
+            <label><input type="radio" name="nv-priority" value="2"><span>高</span></label>
+          </span>
+        </div>
+        <label class="check" id="nv-indicator-row"><input type="checkbox" id="nv-indicator"> 在视频上显示状态指示器</label>
+      </div>
+
+      <div class="nv-block">
+        <div class="row">
+          <label for="nv-preset">预设</label>
+          <select id="nv-preset" class="nv-wide"></select>
+        </div>
+        <div class="nv-actions">
+          <button type="button" class="btn small" id="nv-apply">应用</button>
+          <button type="button" class="btn small" id="nv-save" aria-expanded="false" aria-controls="nv-save-form">保存为预设…</button>
+          <button type="button" class="btn small" id="nv-delete">删除</button>
+        </div>
+        <div class="nv-save-form" id="nv-save-form" hidden>
+          <input type="text" id="nv-preset-name" maxlength="24" aria-label="预设名称" placeholder="预设名称" enterkeyhint="done" autocomplete="off">
+          <button type="button" class="btn small" id="nv-save-ok">保存</button>
+          <button type="button" class="btn small" id="nv-save-cancel">取消</button>
+        </div>
+      </div>
+    </div>
+    <div class="nv-msg" id="nv-msg" role="status" aria-live="polite"></div>
+  </section>
+
   <section class="group">
     <div class="row">
       <label for="site-rule">本网站 <span class="host" id="site-host"></span></label>
@@ -81,6 +179,15 @@
         <input type="time" id="night-end" required aria-label="结束时间">
       </span>
     </div>
+    <div class="row">
+      <label for="nv-night-preset">夜间套用 NVIDIA 预设</label>
+      <select id="nv-night-preset" class="nv-pick" aria-describedby="nv-schedule-hint"></select>
+    </div>
+    <div class="row">
+      <label for="nv-day-preset">其余时间套用</label>
+      <select id="nv-day-preset" class="nv-pick" aria-describedby="nv-schedule-hint"></select>
+    </div>
+    <p class="hint" id="nv-schedule-hint">按上面的时段自动切换，与夜间护眼开关无关</p>
   </section>
 
   <section class="group">

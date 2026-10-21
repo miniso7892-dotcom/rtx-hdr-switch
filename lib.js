@@ -22,7 +22,8 @@
     night: { enabled: false, start: '23:00', end: '07:00' },
     eye: { minutes: 45, autoOff: false },
     osd: true,
-    sites: {}
+    sites: {},
+    nv: { presets: [], nightPresetId: null, dayPresetId: null }
   });
 
   const REASON_TEXT = Object.freeze({
@@ -56,6 +57,47 @@
   const DARK_FRAMES = 6;
   const AUTO_HOLD_MS = 10000;
   const BLACK_FRAME = 0.98;
+
+  // ---------- NVIDIA 设置（本地组件 native-host） ----------
+
+  const NV_HOST = 'io.github.rtx_hdr_switch';
+  const NV_PROTOCOL = 1;
+  const NV_MAX_PRESETS = 20;
+  const NV_NAME_MAX = 24;
+  const NV_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
+  // 0x330 里的「在视频上显示状态指示器」：0x1 HDR、0x100 超分
+  const NV_INDICATOR_BITS = 0x101;
+  // NVIDIA App 的取值范围；最高亮度在预设里只粗夹到 400..10000，套用时再夹到显卡实时报告的 peakMin..peakMax
+  const NV_RANGES = deepFreeze({
+    hdr: {
+      peak: { min: 400, max: 10000 },
+      middleGrey: { min: 10, max: 100 },
+      contrast: { min: -100, max: 100 },
+      saturation: { min: -100, max: 100 }
+    },
+    vsr: {
+      mode: { min: 0, max: 5 }, // 0 关，1..4 手动质量级别，5 自动
+      priority: { min: 0, max: 2 } // GPU 优先级 低/中/高，只在自动模式下有意义
+    }
+  });
+  const NV_HDR_FIELDS = ['peak', 'middleGrey', 'contrast', 'saturation'];
+  const NV_VSR_FIELDS = ['mode', 'priority'];
+  // 0x318 errorCode（2 是 NVIDIA 自己翻错了的那句，这里写对）
+  const NV_HDR_ERROR_TEXT = Object.freeze({
+    1: '未检测到活动的 HDR10 显示器。',
+    2: 'Windows 显示设置中未开启 HDR。',
+    3: '禁用 Surround 以使用 HDR'
+  });
+  const NV_FIELD_TEXT = Object.freeze({
+    'hdr.enabled': 'HDR',
+    'hdr.peak': '最高亮度',
+    'hdr.middleGrey': '中间灰',
+    'hdr.contrast': '对比度',
+    'hdr.saturation': '饱和度',
+    'vsr.mode': '超分辨率',
+    'vsr.priority': 'GPU 优先级',
+    indicator: '状态指示器'
+  });
 
   // ---------- 通用 ----------
 
@@ -150,8 +192,64 @@
       },
       eye: { minutes: minutes, autoOff: bool(eye.autoOff, d.eye.autoOff) },
       osd: bool(s.osd, d.osd),
-      sites: sites
+      sites: sites,
+      nv: normNv(s.nv)
     };
+  }
+
+  // 数字或数字字符串 → 夹到范围内的整数；非法返回 null
+  function nvInt(v, r) {
+    const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+    return typeof n === 'number' && isFinite(n) ? Math.min(r.max, Math.max(r.min, Math.round(n))) : null;
+  }
+
+  // 去掉首尾空白，最多 24 个字符（按码点截断，不拆开代理对）
+  function nvName(v) {
+    if (typeof v !== 'string') return '';
+    return Array.from(v.trim()).slice(0, NV_NAME_MAX).join('').trim();
+  }
+
+  // 预设：{id, name, hdr: {enabled?, peak, middleGrey, contrast, saturation}, vsr?: {mode, priority}}；不合法返回 null
+  function normPreset(p) {
+    if (!isObj(p) || !isObj(p.hdr)) return null;
+    const id = typeof p.id === 'string' && NV_ID_RE.test(p.id) ? p.id : null;
+    const name = nvName(p.name);
+    if (!id || !name) return null;
+    const hdr = {};
+    if (typeof p.hdr.enabled === 'boolean') hdr.enabled = p.hdr.enabled;
+    for (const k of NV_HDR_FIELDS) {
+      const n = nvInt(p.hdr[k], NV_RANGES.hdr[k]);
+      if (n == null) return null;
+      hdr[k] = n;
+    }
+    const out = { id: id, name: name, hdr: hdr };
+    // 超分：mode 必须有；priority 可以没有（驱动没有 GPU 优先级时存的预设）
+    const mode = isObj(p.vsr) ? nvInt(p.vsr.mode, NV_RANGES.vsr.mode) : null;
+    if (mode != null) {
+      out.vsr = { mode: mode };
+      const priority = nvInt(p.vsr.priority, NV_RANGES.vsr.priority);
+      if (priority != null) out.vsr.priority = priority;
+    }
+    return out;
+  }
+
+  function normNv(raw) {
+    const v = isObj(raw) ? raw : {};
+    const presets = [];
+    const ids = new Set();
+    if (Array.isArray(v.presets)) {
+      for (const p of v.presets) {
+        if (presets.length >= NV_MAX_PRESETS) break;
+        const n = normPreset(p);
+        if (n && !ids.has(n.id)) {
+          ids.add(n.id);
+          presets.push(n);
+        }
+      }
+    }
+    // 指向已删除预设的时段设置变回「不切换」
+    const ref = function (id) { return typeof id === 'string' && ids.has(id) ? id : null; };
+    return { presets: presets, nightPresetId: ref(v.nightPresetId), dayPresetId: ref(v.dayPresetId) };
   }
 
   // 快捷键「开/关 自动检测」：在 'off' 与上次使用的模式之间切换
@@ -573,6 +671,230 @@
       (shortcut ? '（按 ' + shortcut + ' 可恢复 HDR）' : '（可在扩展弹窗里恢复 HDR）');
   }
 
+  // ---------- NVIDIA 设置 ----------
+
+  function nvFail(code, extra) {
+    return { ok: false, error: Object.assign({ code: code }, extra) };
+  }
+
+  /**
+   * 本地组件返回的 State → 字段齐全的新对象（不合法返回 null）。读数保持原值，只补默认值：
+   * {hdr: {supported, enabled, active, error, peak, peakMin, peakMax, middleGrey, contrast, saturation},
+   *  vsr: {supported, mode, level, priority}, indicator, flags}
+   * 驱动没有 0x32F / 0x330 时本地组件回 null：vsr.priority、indicator、flags 保持 null（界面隐藏对应控件）
+   */
+  function nvNormState(raw) {
+    if (!isObj(raw) || !isObj(raw.hdr) || !isObj(raw.vsr)) return null;
+    const h = raw.hdr, v = raw.vsr;
+    const int = function (x, d) { return Number.isInteger(x) ? x : d; };
+    const peakMin = int(h.peakMin, 0) > 0 ? h.peakMin : NV_RANGES.hdr.peak.min;
+    const peak = int(h.peak, peakMin);
+    const peakMax = int(h.peakMax, 0) >= peakMin ? h.peakMax : Math.max(peakMin, peak);
+    const flags = int(raw.flags, -1) >= 0 ? raw.flags : null;
+    return {
+      hdr: {
+        supported: h.supported === true,
+        enabled: h.enabled === true,
+        active: h.active === true,
+        error: int(h.error, 0) > 0 ? h.error : 0,
+        peak: peak,
+        peakMin: peakMin,
+        peakMax: peakMax,
+        middleGrey: int(h.middleGrey, 50),
+        contrast: int(h.contrast, 0),
+        saturation: int(h.saturation, 0)
+      },
+      vsr: {
+        supported: v.supported === true,
+        mode: int(v.mode, 0),
+        level: int(v.level, 0),
+        priority: int(v.priority, null)
+      },
+      indicator: typeof raw.indicator === 'boolean' ? raw.indicator : flags === null ? null : (flags & NV_INDICATOR_BITS) !== 0,
+      flags: flags
+    };
+  }
+
+  /**
+   * 检查一次 set 的参数（与本地组件的校验一致：全部字段先校验，任何一个不合法整个请求作废；只收整数）。
+   * patch: {hdr?: {enabled?, peak?, middleGrey?, contrast?, saturation?}, vsr?: {mode?, priority?}, indicator?, commit?}
+   * state: 当前 State（可省略）。给了就按实时的 peakMin..peakMax 检查最高亮度，并拒绝不支持 / HDR 出错时的写入。
+   * 返回 {ok: true, patch: 只含已知字段的新对象} 或 {ok: false, error: {code, field?, …}}
+   */
+  function nvValidatePatch(patch, state) {
+    if (!isObj(patch)) return nvFail('bad-request', { message: 'patch 必须是对象' });
+    const st = state == null ? null : nvNormState(state);
+    const out = {};
+    const groups = [['hdr', NV_HDR_FIELDS], ['vsr', NV_VSR_FIELDS]];
+    for (const g of groups) {
+      const name = g[0];
+      const src = patch[name];
+      if (src === undefined) continue;
+      if (!isObj(src)) return nvFail('range', { field: name });
+      const o = {};
+      if (name === 'hdr' && src.enabled !== undefined) {
+        if (typeof src.enabled !== 'boolean') return nvFail('range', { field: 'hdr.enabled' });
+        o.enabled = src.enabled;
+      }
+      for (const k of g[1]) {
+        const x = src[k];
+        if (x === undefined) continue;
+        let r = NV_RANGES[name][k];
+        if (name === 'hdr' && k === 'peak' && st) r = { min: st.hdr.peakMin, max: st.hdr.peakMax };
+        if (!Number.isInteger(x) || x < r.min || x > r.max) {
+          return nvFail('range', { field: name + '.' + k, min: r.min, max: r.max });
+        }
+        o[k] = x;
+      }
+      if (Object.keys(o).length) out[name] = o;
+    }
+    for (const k of ['indicator', 'commit']) {
+      if (patch[k] === undefined) continue;
+      if (typeof patch[k] !== 'boolean') return nvFail('range', { field: k });
+      out[k] = patch[k];
+    }
+    if (st) {
+      if (out.hdr && !st.hdr.supported) return nvFail('unsupported', { field: 'hdr' });
+      if (out.hdr && st.hdr.error) return nvFail('hdr-error', { errorCode: st.hdr.error });
+      if (out.vsr && !st.vsr.supported) return nvFail('unsupported', { field: 'vsr' });
+      if (out.vsr && out.vsr.priority !== undefined && st.vsr.priority === null) return nvFail('unsupported', { field: 'vsr.priority' });
+      if (out.indicator !== undefined && st.indicator === null) return nvFail('unsupported', { field: 'indicator' });
+    }
+    return { ok: true, patch: out };
+  }
+
+  // 两次 set 合并成一次（b 覆盖 a；任何一次要 commit 就 commit）；都不是对象时返回 null
+  function nvMergePatch(a, b) {
+    if (!isObj(a) && !isObj(b)) return null;
+    const A = isObj(a) ? a : {}, B = isObj(b) ? b : {};
+    const out = Object.assign({}, A, B);
+    for (const k of ['hdr', 'vsr']) {
+      if (isObj(A[k]) || isObj(B[k])) out[k] = Object.assign({}, isObj(A[k]) ? A[k] : null, isObj(B[k]) ? B[k] : null);
+    }
+    if (A.commit === true || B.commit === true) out.commit = true;
+    return out;
+  }
+
+  // 乐观更新：把 patch 套到 state 上得到新 State（不改输入）
+  function nvApplyPatch(state, patch) {
+    const st = nvNormState(state);
+    if (!st) return null;
+    const p = isObj(patch) ? patch : {};
+    if (isObj(p.hdr)) {
+      if (typeof p.hdr.enabled === 'boolean') st.hdr.enabled = p.hdr.enabled;
+      for (const k of NV_HDR_FIELDS) if (Number.isInteger(p.hdr[k])) st.hdr[k] = p.hdr[k];
+    }
+    if (isObj(p.vsr)) for (const k of NV_VSR_FIELDS) if (Number.isInteger(p.vsr[k])) st.vsr[k] = p.vsr[k];
+    if (typeof p.indicator === 'boolean' && st.indicator !== null) {
+      st.indicator = p.indicator;
+      st.flags = p.indicator ? (st.flags | NV_INDICATOR_BITS) : (st.flags & ~NV_INDICATOR_BITS);
+    }
+    return st;
+  }
+
+  // 当前设置存成预设（不支持超分时不带 vsr）；state 或名称不合法返回 null
+  function nvPresetFromState(state, name, id) {
+    const st = nvNormState(state);
+    if (!st) return null;
+    const h = st.hdr;
+    const raw = {
+      id: id,
+      name: name,
+      hdr: { enabled: h.enabled, peak: h.peak, middleGrey: h.middleGrey, contrast: h.contrast, saturation: h.saturation }
+    };
+    if (st.vsr.supported) raw.vsr = { mode: st.vsr.mode, priority: st.vsr.priority };
+    return normPreset(raw); // priority 为 null（驱动没有）时 normPreset 会去掉它
+  }
+
+  /**
+   * 套用预设要发的 set（commit:true）。最高亮度再夹到实时的 peakMin..peakMax；
+   * 显卡不支持或 HDR 出错（errorCode≠0）的部分跳过。什么都写不了时返回 null。
+   */
+  function nvPresetPatch(preset, state) {
+    const p = normPreset(preset);
+    const st = nvNormState(state);
+    if (!p || !st) return null;
+    const out = {};
+    if (st.hdr.supported && !st.hdr.error) {
+      const h = {};
+      if (typeof p.hdr.enabled === 'boolean') h.enabled = p.hdr.enabled;
+      h.peak = Math.min(st.hdr.peakMax, Math.max(st.hdr.peakMin, p.hdr.peak));
+      h.middleGrey = p.hdr.middleGrey;
+      h.contrast = p.hdr.contrast;
+      h.saturation = p.hdr.saturation;
+      out.hdr = h;
+    }
+    if (p.vsr && st.vsr.supported) {
+      out.vsr = { mode: p.vsr.mode };
+      if (p.vsr.priority !== undefined && st.vsr.priority !== null) out.vsr.priority = p.vsr.priority;
+    }
+    if (!out.hdr && !out.vsr) return null;
+    out.commit = true;
+    return out;
+  }
+
+  // 按夜间护眼的时段分「夜间 / 其余时间」，与夜间护眼开关无关；时段为空（起止相同）时总是 'day'
+  function nvSchedulePhase(nightCfg, minutes) {
+    const n = isObj(nightCfg) ? nightCfg : {};
+    const m = typeof minutes === 'number' ? minutes : minutesOfDay(minutes);
+    return inNightWindow({ enabled: true, start: n.start, end: n.end }, m) ? 'night' : 'day';
+  }
+
+  // 快捷键「下一个预设」：currentId 的下一个（循环）；找不到 currentId 时从第一个开始；没有预设返回 null
+  function nvNextPresetId(presets, currentId) {
+    const ids = Array.isArray(presets) ? presets.filter(isObj).map(function (p) { return p.id; }) : [];
+    if (!ids.length) return null;
+    const i = ids.indexOf(currentId);
+    return ids[(i + 1) % ids.length];
+  }
+
+  // 「预设 N」里第一个没被占用的 N
+  function nvDefaultPresetName(presets) {
+    const used = new Set(Array.isArray(presets) ? presets.filter(isObj).map(function (p) { return p.name; }) : []);
+    let n = 1;
+    while (used.has('预设 ' + n)) n++;
+    return '预设 ' + n;
+  }
+
+  function nvHdrErrorText(code) {
+    return NV_HDR_ERROR_TEXT[code] || (code ? 'HDR 不可用（错误 ' + code + '）' : '');
+  }
+
+  // chrome.runtime.lastError.message → 统一的错误回复
+  function nvPortError(message) {
+    const m = String(message == null ? '' : message);
+    let code = 'host-error';
+    if (!m || /exited/i.test(m)) code = 'host-exit';
+    else if (/not found/i.test(m)) code = 'host-missing';
+    else if (/forbidden/i.test(m)) code = 'host-forbidden';
+    return nvFail(code, m ? { message: m } : undefined);
+  }
+
+  function nvErrorText(err) {
+    const e = isObj(err) ? err : { code: err };
+    switch (e.code) {
+      case 'host-missing': return '未安装本地组件，无法读写 NVIDIA 设置。';
+      // 只在扩展 ID 不在本地组件清单的 allowed_origins 里时出现，重新运行 install.cmd 解决不了
+      case 'host-forbidden': return '本地组件只接受仓库里这份扩展（ID 由 manifest.json 的 key 决定）。请用仓库文件夹以「加载已解压的扩展程序」方式安装，不要用删掉 key 或重新打包的副本。';
+      case 'host-exit': return '本地组件意外退出。';
+      case 'host-error': return '无法与本地组件通信。';
+      case 'timeout': return '本地组件没有响应。';
+      case 'protocol': return '本地组件版本不匹配，请更新后重新运行 install.cmd。';
+      case 'no-dll': return '未找到 NVIDIA App（nvcpl.dll），请先安装 NVIDIA App。';
+      case 'init': return 'NVIDIA 接口初始化失败。';
+      case 'api': return 'NVIDIA 接口调用失败' + (e.rc != null ? '（rc=' + e.rc + '）' : '') + '。';
+      case 'range': return '数值超出范围' + (e.field ? '（' + (NV_FIELD_TEXT[e.field] || e.field) + '）' : '') + '。';
+      case 'unsupported': return e.field === 'vsr' ? '此显卡或驱动不支持 RTX 视频超分辨率。'
+        : e.field === 'hdr' ? '此显卡或驱动不支持 RTX 视频 HDR。'
+          : e.field === 'vsr.priority' ? '此驱动不支持 GPU 优先级设置。'
+            : e.field === 'indicator' ? '此驱动不支持状态指示器设置。' : '此显卡或驱动不支持该设置。';
+      case 'hdr-error': return nvHdrErrorText(e.errorCode) || 'HDR 当前不可用。';
+      case 'bad-request': return '请求格式错误。';
+      case 'internal': return '本地组件内部错误。';
+      default: return '未知错误' + (e.code ? '（' + e.code + '）' : '') + '。';
+    }
+  }
+
   const api = Object.freeze({
     DEFAULT_SETTINGS: DEFAULT_SETTINGS,
     REASON_TEXT: REASON_TEXT,
@@ -608,7 +930,24 @@
     eyeState: eyeState,
     eyeUpdate: eyeUpdate,
     eyeRestAt: eyeRestAt,
-    eyeReminderText: eyeReminderText
+    eyeReminderText: eyeReminderText,
+    NV_HOST: NV_HOST,
+    NV_PROTOCOL: NV_PROTOCOL,
+    NV_MAX_PRESETS: NV_MAX_PRESETS,
+    NV_NAME_MAX: NV_NAME_MAX,
+    NV_RANGES: NV_RANGES,
+    nvNormState: nvNormState,
+    nvValidatePatch: nvValidatePatch,
+    nvMergePatch: nvMergePatch,
+    nvApplyPatch: nvApplyPatch,
+    nvPresetFromState: nvPresetFromState,
+    nvPresetPatch: nvPresetPatch,
+    nvSchedulePhase: nvSchedulePhase,
+    nvNextPresetId: nvNextPresetId,
+    nvDefaultPresetName: nvDefaultPresetName,
+    nvHdrErrorText: nvHdrErrorText,
+    nvPortError: nvPortError,
+    nvErrorText: nvErrorText
   });
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
