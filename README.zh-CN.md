@@ -2,6 +2,12 @@
 
 [English](README.md) | 简体中文
 
+<p align="center"><img src="docs/media/banner-zh.png" alt="RTX HDR 开关：把 HDR 控制权装进浏览器" width="100%"></p>
+
+<p align="center"><img src="docs/media/demo.gif" alt="点一下，白底课件关闭 HDR，旁边的电影照样 HDR" width="100%"><br><sub>演示中的东京照片来自 <a href="https://www.freepik.com/free-photo/aerial-view-tokyo-cityscape-with-fuji-mountain-japan_10824379.htm">Freepik 上的 tawatchai07</a></sub></p>
+
+<p align="center"><b><a href="https://github.com/miniso7892-dotcom/rtx-hdr-switch/releases/latest">下载最新版本</a></b></p>
+
 按视频控制 NVIDIA「RTX 视频增强」的 HDR（RTX Video HDR / TrueHDR）：想要高亮度的视频保持 HDR，白底、纯白、长时间观看的视频切回 SDR。支持快捷键、B 站 / YouTube / Twitch / 腾讯视频播放器控制栏里的 HDR 按钮、记住每个视频的选择、自动识别白底视频、夜间护眼和连续观看提醒；装上可选的本地组件后，还能在弹窗里直接调 NVIDIA 的 RTX 视频参数、按 Windows 的 SDR 亮度一键对齐、只关 HDR 保留超分。界面有中文和英文，主题色可以换。
 
 > **按视频切换时，该视频的 RTX 超分（VSR）会和 HDR 一起关闭**（Chrome 的限制）。想保留超分，可以在「规则」里打开 [只关 HDR，保留超分](#只关-hdr保留超分)（需要本地组件；关的是 NVIDIA 全局 HDR）。

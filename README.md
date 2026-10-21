@@ -2,6 +2,12 @@
 
 English | [简体中文](README.zh-CN.md)
 
+<p align="center"><img src="docs/media/banner-en.png" alt="RTX HDR Switch: per-video HDR control in your browser" width="100%"></p>
+
+<p align="center"><img src="docs/media/demo.gif" alt="One click turns HDR off for a white lecture video while the movie next to it stays HDR" width="100%"><br><sub>Tokyo photo in the demo by <a href="https://www.freepik.com/free-photo/aerial-view-tokyo-cityscape-with-fuji-mountain-japan_10824379.htm">tawatchai07 on Freepik</a></sub></p>
+
+<p align="center"><b><a href="https://github.com/miniso7892-dotcom/rtx-hdr-switch/releases/latest">Download the latest release</a></b></p>
+
 A Chrome / Edge extension (Manifest V3) that turns NVIDIA **RTX Video HDR** on or off **per video**. Keep HDR for videos where you want the extra brightness; switch white-background slides, screen recordings and long viewing sessions back to SDR. Comes with keyboard shortcuts, per-video memory, automatic detection of white-background videos, a night window and a continuous-viewing reminder. With the optional local helper you can also tune NVIDIA's RTX Video settings from the popup, match them to your Windows SDR brightness in one click, and turn off HDR only while keeping Super Resolution. The interface is in English and Chinese, with a selectable theme color.
 
 > **Switching HDR off for one video also switches off RTX Video Super Resolution (VSR) for that video** (a Chrome limitation). To keep VSR, turn on [Turn off HDR only, keep super resolution](#turn-off-hdr-only-keep-super-resolution) in the Rules tab (needs the local helper; it switches NVIDIA's global HDR).
