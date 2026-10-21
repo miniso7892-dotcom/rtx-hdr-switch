@@ -1,18 +1,27 @@
 {
   "manifest_version": 3,
-  "name": "HDR Switch for RTX Video",
-  "version": "1.1.0",
-  "description": "按视频开关 NVIDIA RTX 视频 HDR（超分会一起关闭）：快捷键、记住选择、自动识别白底视频、夜间护眼与连续观看提醒。",
+  "name": "__MSG_extName__",
+  "version": "1.2.0",
+  "description": "__MSG_extDescription__",
+  "default_locale": "en",
   "homepage_url": "https://github.com/miniso7892-dotcom/rtx-hdr-switch",
-  "minimum_chrome_version": "116",
+  "minimum_chrome_version": "120",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlxcGG6dHmXDHRmDqtLa4JAIUXgDsVKGHKlTJ0eBQi5Y2L2yyxFa8geSVmhj6C34R/pi0HBhSzZvCQSLBKcOw62hjr3ekYFE3SmbdCm2hdxO+u6l9TxOEBZcvaMGWsqU5l06GcGTY5UA/BWJIvGIwgAOmAVU4ij159XaJQnq3XFR/dUnulJ+B5wj5S0P/bG82sIlyh09fqSeKLieWdO/suhbkG1gECmfCZjO4MFUivQ8uKQ0pnEwJRanECTFK+tkGCwIIDAGx43r4QXiJT6kMsc0U+CpIKahesUSUXmwxUmDTYW+DB1bu0E5zal3AaEmlbMAt2/1qKn6N+7XjsPRoyQIDAQAB",
-  "permissions": ["storage", "scripting", "tabs", "nativeMessaging", "alarms"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "storage",
+    "scripting",
+    "tabs",
+    "nativeMessaging",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "RTX HDR 开关",
+    "default_title": "__MSG_actionTitle__",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
@@ -20,6 +29,10 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
   },
   "icons": {
     "16": "icons/icon16.png",
@@ -29,8 +42,14 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["lib.js", "content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "i18n.js",
+        "lib.js",
+        "content.js"
+      ],
       "all_frames": true,
       "match_about_blank": true,
       "match_origin_as_fallback": true,
@@ -39,18 +58,34 @@
   ],
   "commands": {
     "toggle-hdr": {
-      "suggested_key": { "default": "Alt+H" },
-      "description": "切换当前视频的 RTX HDR"
+      "suggested_key": {
+        "default": "Alt+H"
+      },
+      "description": "__MSG_cmdToggleHdr__"
     },
     "toggle-auto": {
-      "suggested_key": { "default": "Alt+Shift+H" },
-      "description": "开/关 自动检测白底视频"
+      "suggested_key": {
+        "default": "Alt+Shift+H"
+      },
+      "description": "__MSG_cmdToggleAuto__"
+    },
+    "nv-mg-up": {
+      "suggested_key": {
+        "default": "Alt+Shift+Up"
+      },
+      "description": "__MSG_cmdMgUp__"
+    },
+    "nv-mg-down": {
+      "suggested_key": {
+        "default": "Alt+Shift+Down"
+      },
+      "description": "__MSG_cmdMgDown__"
     },
     "forget-video": {
-      "description": "清除当前视频的记忆（恢复按规则决定）"
+      "description": "__MSG_cmdForgetVideo__"
     },
     "nv-next-preset": {
-      "description": "切换到下一个 NVIDIA 预设"
+      "description": "__MSG_cmdNextPreset__"
     }
   }
 }

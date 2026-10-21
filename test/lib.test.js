@@ -642,7 +642,7 @@ test('NV 常量', () => {
 
 test('mergeSettings: nv 默认值', () => {
   const m = L.mergeSettings(null);
-  assert.deepEqual(m.nv, { presets: [], nightPresetId: null, dayPresetId: null });
+  assert.deepEqual(m.nv, { presets: [], nightPresetId: null, dayPresetId: null, followSdr: false, displayId: null });
   assert.deepEqual(L.mergeSettings({ nv: 'x' }).nv, m.nv);
   assert.deepEqual(L.mergeSettings({ nv: { presets: 'x', nightPresetId: 5 } }).nv, m.nv);
   // 不共享默认对象
@@ -939,6 +939,190 @@ test('NV 错误文案', () => {
   }
 });
 
+// ---------- 界面文字 ----------
+
+test('i18n：中英文键一致、没有空值、占位符一致', () => {
+  const I = require('../i18n.js');
+  const zh = Object.keys(I.DICT.zh).sort();
+  const en = Object.keys(I.DICT.en).sort();
+  assert.deepEqual(en, zh);
+  for (const lang of ['zh', 'en']) {
+    for (const [k, v] of Object.entries(I.DICT[lang])) assert.ok(typeof v === 'string' && v.length > 0, lang + ' ' + k);
+  }
+  const ph = (v) => Array.from(v.matchAll(/\{(\w+)\}/g), (m) => m[1]).sort().join(',');
+  for (const k of zh) assert.equal(ph(I.DICT.en[k]), ph(I.DICT.zh[k]), '占位符 ' + k);
+  assert.equal(I.resolve('auto', 'zh-CN'), 'zh');
+  assert.equal(I.resolve('auto', 'zh-TW'), 'zh');
+  assert.equal(I.resolve('auto', 'en-US'), 'en');
+  assert.equal(I.resolve('auto', ''), 'en');
+  assert.equal(I.resolve('en', 'zh-CN'), 'en');
+  assert.equal(I.t('en', 'nv.saved', { name: 'A' }), 'Saved preset: A');
+  assert.equal(I.t('en', 'no.such.key'), 'no.such.key');
+  assert.equal(I.t('xx', 'tab.video'), '视频'); // 不认识的语言用中文
+});
+
+test('i18n：弹窗、选项页、内容脚本、background 用到的键都存在', () => {
+  const I = require('../i18n.js');
+  const keys = new Set(Object.keys(I.DICT.zh));
+  for (const f of ['popup.html', 'options.html']) {
+    const html = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    for (const m of html.matchAll(/data-i18n="([^"]+)"/g)) assert.ok(keys.has(m[1]), f + ' ' + m[1]);
+    for (const m of html.matchAll(/data-i18n-attr="([^"]+)"/g)) {
+      for (const pair of m[1].split(';')) assert.ok(keys.has(pair.split(':')[1]), f + ' ' + pair);
+    }
+  }
+  for (const f of ['popup.js', 'options.js', 'content.js', 'background.js']) {
+    const js = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    // t('key') / L.t(lang, 'key')
+    for (const m of js.matchAll(/\bt\((?:lang, |lg, )?'([a-z][\w.-]*)'\s*[,)]/g)) assert.ok(keys.has(m[1]), f + ' ' + m[1]);
+  }
+});
+
+test('文案：英文', () => {
+  assert.equal(L.reasonText('manual', 'en'), 'manual');
+  assert.equal(L.osdText('off', 'auto', 'en'), 'RTX HDR: off (auto · white)');
+  assert.equal(L.osdText('on', 'nothing', 'en'), 'RTX HDR: on');
+  assert.equal(L.autoModeText('both', 'en'), 'Turn off and on');
+  assert.equal(L.formatLuma(0.5, 0.25, 'en'), 'Brightness 50% · white 25%');
+  assert.equal(L.eyeReminderText(30, false, '', 'en'), "You've watched HDR for 30 min — time to rest your eyes");
+  assert.equal(L.nvErrorText({ code: 'range', field: 'hdr.peak' }, 'en'), 'Value out of range (peak brightness).');
+  assert.equal(L.nvErrorText({ code: 'weird' }, 'en'), 'Unknown error (weird).');
+  assert.equal(L.nvHdrErrorText(2, 'en'), 'HDR is off in Windows display settings.');
+  assert.equal(L.nvDefaultPresetName([{ name: 'Preset 1' }], 'en'), 'Preset 2');
+  assert.equal(L.nvDefaultPresetName([{ name: 'Preset 1' }]), '预设 1');
+});
+
+// ---------- 主题色 ----------
+
+test('主题色：规范化与文字色', () => {
+  assert.equal(L.normAccent('#a98bff'), '#A98BFF');
+  assert.equal(L.normAccent('abc'), '#AABBCC');
+  assert.equal(L.normAccent('#12345'), L.DEFAULT_ACCENT);
+  assert.equal(L.normAccent(null), L.DEFAULT_ACCENT);
+  assert.equal(L.DEFAULT_ACCENT, '#A98BFF');
+  assert.ok(L.ACCENTS.some((a) => a.hex === L.DEFAULT_ACCENT));
+  // 预设色都够亮：上面放黑字，放在黑底上也看得清
+  for (const a of L.ACCENTS) {
+    const ink = L.accentInk(a.hex);
+    assert.equal(ink.on, '#0A0A0A', a.id);
+    assert.equal(ink.fg, a.hex, a.id);
+  }
+  const dark = L.accentInk('#2E5BFF');
+  assert.equal(dark.on, '#FAFAFA');
+  assert.equal(dark.fg, '#FAFAFA');
+  assert.equal(L.accentInk('#FFFFFF').on, '#0A0A0A');
+  assert.equal(L.accentInk('#000000').on, '#FAFAFA');
+});
+
+test('mergeSettings：界面语言、主题色、只关 HDR、控制栏按钮、跟随 SDR', () => {
+  const d = L.mergeSettings(null);
+  assert.deepEqual(d.ui, { lang: 'auto', accent: '#A98BFF' });
+  assert.equal(d.hdrOnly, false);
+  assert.equal(d.playerButton, true);
+  const m = L.mergeSettings({ ui: { lang: 'en', accent: '#c8ff2e' }, hdrOnly: true, playerButton: false, nv: { followSdr: true, displayId: 'dev-1' } });
+  assert.deepEqual(m.ui, { lang: 'en', accent: '#C8FF2E' });
+  assert.equal(m.hdrOnly, true);
+  assert.equal(m.playerButton, false);
+  assert.equal(m.nv.followSdr, true);
+  assert.equal(m.nv.displayId, 'dev-1');
+  const bad = L.mergeSettings({ ui: { lang: 'fr', accent: 'red' }, hdrOnly: 'yes', playerButton: 1, nv: { followSdr: 'true', displayId: '' } });
+  assert.deepEqual(bad.ui, { lang: 'auto', accent: '#A98BFF' });
+  assert.equal(bad.hdrOnly, false);
+  assert.equal(bad.playerButton, true);
+  assert.equal(bad.nv.followSdr, false);
+  assert.equal(bad.nv.displayId, null);
+});
+
+// ---------- SDR 亮度 → 建议值 ----------
+
+test('nvSuggest：中间灰 = SDR 白 × 0.2158，最高亮度 ≤ 1000，对比度 +25', () => {
+  const st = { hdr: { supported: true, enabled: true, peak: 1400, peakMin: 400, peakMax: 1970, middleGrey: 65, contrast: 0, saturation: 0 }, vsr: { supported: true } };
+  const disp = (nits, hdr) => ({ id: 'd', name: 'X', hdrEnabled: hdr !== false, hdrSupported: true, sdrWhiteNits: nits, sdrSlider: Math.round((nits - 80) / 4) });
+  assert.deepEqual(L.nvSuggest(disp(276), st), { middleGrey: 60, peak: 1000, contrast: 25 });
+  assert.deepEqual(L.nvSuggest(disp(480), st), { middleGrey: 100, peak: 1000, contrast: 25 }); // 480 × 0.2158 = 104 → 夹到 100
+  assert.deepEqual(L.nvSuggest(disp(80), st), { middleGrey: 17, peak: 1000, contrast: 25 });
+  // 显卡上限低于 1000 时取上限
+  assert.equal(L.nvSuggest(disp(276), { hdr: { peak: 700, peakMin: 400, peakMax: 800 }, vsr: {} }).peak, 800);
+  assert.equal(L.nvSuggest(disp(276, false), st), null, '显示器没开 HDR');
+  assert.equal(L.nvSuggest({ id: 'd', hdrEnabled: true }, st), null, '读不到白电平');
+  assert.equal(L.nvSuggest(null, st), null);
+  assert.equal(L.K_MID, 0.2158);
+});
+
+test('nvNormDisplay / nvPickDisplay', () => {
+  assert.equal(L.nvNormDisplay({ name: 'x' }), null);
+  const d = L.nvNormDisplay({ id: 'a', name: 'Mon', hdrEnabled: true, sdrWhiteNits: 276 });
+  assert.equal(d.sdrSlider, 49);
+  assert.equal(L.nvNormDisplay({ id: 'a', sdrWhiteNits: 999, sdrSlider: 150 }).sdrSlider, 100);
+  const list = [{ id: 'a', hdrEnabled: false, sdrWhiteNits: 200 }, { id: 'b', hdrEnabled: true, sdrWhiteNits: 300 }, { bad: 1 }];
+  assert.equal(L.nvPickDisplay(list, 'a').id, 'a');
+  assert.equal(L.nvPickDisplay(list, 'zz').id, 'b', '记住的不在了：第一个开着 HDR 的');
+  assert.equal(L.nvPickDisplay([{ id: 'c' }], null).id, 'c');
+  assert.equal(L.nvPickDisplay([], null), null);
+  assert.equal(L.nvPickDisplay(null, null), null);
+});
+
+test('nvMgStep：±5 夹到 10..100', () => {
+  const st = (mg) => ({ hdr: { middleGrey: mg, peak: 1000, peakMin: 400, peakMax: 1970 }, vsr: {} });
+  assert.deepEqual(L.nvMgStep(st(65), 5), { value: 70, changed: true });
+  assert.deepEqual(L.nvMgStep(st(98), 5), { value: 100, changed: true });
+  assert.deepEqual(L.nvMgStep(st(100), 5), { value: 100, changed: false });
+  assert.deepEqual(L.nvMgStep(st(12), -5), { value: 10, changed: true });
+  assert.equal(L.nvMgStep(null, 5), null);
+});
+
+// ---------- 备份 ----------
+
+test('备份：导出只带设置和视频记忆，导入前检查', () => {
+  const all = {
+    settings: { defaultState: 'off', ui: { accent: '#ff5ca8' }, sites: { 'Example.com': 'off' },
+      nv: { presets: [{ id: 'p1', name: '电影', hdr: { peak: 1000, middleGrey: 60, contrast: 25, saturation: 0 } }] } },
+    'v:yt:abc': { s: 'off', t: 5 },
+    'v:bad': { s: 'maybe' },
+    eyeRest: { on: true, at: 1 },
+    nvLastPhase: { phase: 'day' }
+  };
+  const b = L.makeBackup(all, '1.2.0', Date.UTC(2026, 9, 21, 12, 0));
+  assert.equal(b.format, L.BACKUP_FORMAT);
+  assert.equal(b.version, 1);
+  assert.equal(b.exportedAt, '2026-10-21T12:00:00.000Z');
+  assert.equal(b.extensionVersion, '1.2.0');
+  assert.deepEqual(Object.keys(b.videos), ['yt:abc']);
+  assert.equal(b.settings.ui.accent, '#FF5CA8');
+  assert.ok(!('eyeRest' in b) && !('nvLastPhase' in b));
+
+  const back = L.validateBackup(JSON.parse(JSON.stringify(b)));
+  assert.equal(back.ok, true);
+  assert.deepEqual(back.summary, { videos: 1, presets: 1, sites: 1 });
+  assert.deepEqual(back.settings, b.settings);
+  assert.deepEqual(back.videos, { 'yt:abc': { s: 'off', t: 5 } });
+
+  assert.deepEqual(L.validateBackup(null), { ok: false, code: 'invalid' });
+  assert.deepEqual(L.validateBackup({ format: 'other', version: 1, settings: {} }), { ok: false, code: 'invalid' });
+  assert.deepEqual(L.validateBackup({ format: L.BACKUP_FORMAT, version: 2, settings: {} }), { ok: false, code: 'newer' });
+  assert.deepEqual(L.validateBackup({ format: L.BACKUP_FORMAT, version: 1 }), { ok: false, code: 'invalid' });
+  // 设置里的非法值按 mergeSettings 规范化，视频记忆里的坏条目丢掉
+  const odd = L.validateBackup({ format: L.BACKUP_FORMAT, version: 1, settings: { ui: { lang: 'xx' } }, videos: { a: { s: 'on', t: 1 }, b: 'x' } });
+  assert.equal(odd.ok, true);
+  assert.equal(odd.settings.ui.lang, 'auto');
+  assert.deepEqual(Object.keys(odd.videos), ['a']);
+});
+
+test('备份：视频记忆超过上限时只留最新的', () => {
+  const videos = {};
+  for (let i = 0; i < L.MAX_VIDEO_ENTRIES + 5; i++) videos['k' + i] = { s: 'on', t: i };
+  const r = L.validateBackup({ format: L.BACKUP_FORMAT, version: 1, settings: {}, videos: videos });
+  assert.equal(r.summary.videos, L.MAX_VIDEO_ENTRIES);
+  assert.ok(!('k0' in r.videos) && ('k' + (L.MAX_VIDEO_ENTRIES + 4)) in r.videos);
+});
+
+test('options.js 用到的元素 id 在 options.html 里都有', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'options.html'), 'utf8');
+  const js = fs.readFileSync(path.join(ROOT, 'options.js'), 'utf8');
+  const ids = new Set(Array.from(html.matchAll(/\bid="([^"]+)"/g), (m) => m[1]));
+  for (const m of js.matchAll(/\$\('([^']+)'\)/g)) assert.ok(ids.has(m[1]), '缺少 #' + m[1]);
+});
+
 // ---------- 弹窗 ----------
 
 test('popup.js 用到的元素 id 在 popup.html 里都有', () => {
@@ -977,34 +1161,50 @@ test('lib.js 不引用 chrome / document / window', () => {
 test('manifest.json 合法且引用的文件都存在', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.name, 'HDR Switch for RTX Video');
+  assert.equal(manifest.name, '__MSG_extName__');
+  assert.equal(manifest.default_locale, 'en');
   assert.ok(manifest.name.length <= 75, 'name 不超过 75 字符');
   assert.equal(new URL(manifest.homepage_url).protocol, 'https:', 'homepage_url 是合法的 https 网址');
-  assert.equal(manifest.version, '1.1.0');
-  assert.equal(manifest.minimum_chrome_version, '116');
+  assert.equal(manifest.version, '1.2.0');
+  assert.equal(manifest.minimum_chrome_version, '120'); // chrome.alarms 30 秒周期
   assert.deepEqual(manifest.permissions.slice().sort(), ['alarms', 'nativeMessaging', 'scripting', 'storage', 'tabs']);
   assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
-  assert.ok(manifest.description.length <= 132, 'description 不超过 132 字符');
+  // 名称、说明、快捷键说明都走 _locales：每种语言都有全部的 __MSG_x__
+  const used = new Set(Array.from(JSON.stringify(manifest).matchAll(/__MSG_(\w+)__/g), (m) => m[1]));
+  for (const loc of ['en', 'zh_CN']) {
+    const msgs = JSON.parse(fs.readFileSync(path.join(ROOT, '_locales', loc, 'messages.json'), 'utf8'));
+    for (const k of used) assert.ok(msgs[k] && msgs[k].message, loc + ' 缺少 ' + k);
+    assert.ok(msgs.extName.message.length <= 75, loc + ' 名称不超过 75 字符');
+    assert.ok(msgs.extDescription.message.length <= 132, loc + ' 说明不超过 132 字符');
+  }
 
   const cs = manifest.content_scripts[0];
-  assert.deepEqual(cs.js, ['lib.js', 'content.js']);
+  assert.deepEqual(cs.js, ['i18n.js', 'lib.js', 'content.js']);
   assert.equal(cs.all_frames, true);
   assert.equal(cs.match_about_blank, true);
   assert.equal(cs.match_origin_as_fallback, true);
   assert.equal(cs.run_at, 'document_start');
   assert.equal(manifest.commands['toggle-hdr'].suggested_key.default, 'Alt+H');
   assert.equal(manifest.commands['toggle-auto'].suggested_key.default, 'Alt+Shift+H');
+  assert.equal(manifest.commands['nv-mg-up'].suggested_key.default, 'Alt+Shift+Up');
+  assert.equal(manifest.commands['nv-mg-down'].suggested_key.default, 'Alt+Shift+Down');
   assert.ok(!manifest.commands['forget-video'].suggested_key);
   assert.ok(!manifest.commands['nv-next-preset'].suggested_key, '下一个 NVIDIA 预设：不预设快捷键');
-  assert.equal(manifest.commands['nv-next-preset'].description, '切换到下一个 NVIDIA 预设');
+  // Chrome 最多接受 4 个预设快捷键
+  assert.ok(Object.values(manifest.commands).filter((c) => c.suggested_key).length <= 4);
+  assert.equal(manifest.options_ui.page, 'options.html');
 
-  const files = new Set([manifest.background.service_worker, manifest.action.default_popup]);
+  const files = new Set([manifest.background.service_worker, manifest.action.default_popup, manifest.options_ui.page]);
   for (const c of manifest.content_scripts) for (const f of c.js || []) files.add(f);
   for (const f of Object.values(manifest.icons)) files.add(f);
   for (const f of Object.values(manifest.action.default_icon)) files.add(f);
-  // popup.html 里引用的脚本和样式
-  const html = fs.readFileSync(path.join(ROOT, manifest.action.default_popup), 'utf8');
-  for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) if (!/^[a-z][a-z0-9+.-]*:/i.test(m[1])) files.add(m[1]); // 跳过外部链接
+  // popup.html / options.html 里引用的脚本和样式，service worker 里 importScripts 的脚本
+  for (const page of [manifest.action.default_popup, manifest.options_ui.page]) {
+    const html = fs.readFileSync(path.join(ROOT, page), 'utf8');
+    for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) if (!/^[a-z][a-z0-9+.-]*:/i.test(m[1])) files.add(m[1]); // 跳过外部链接
+  }
+  const sw = fs.readFileSync(path.join(ROOT, manifest.background.service_worker), 'utf8');
+  for (const m of sw.matchAll(/importScripts\(([^)]*)\)/g)) for (const f of m[1].matchAll(/'([^']+)'/g)) files.add(f[1]);
   for (const f of files) assert.ok(fs.existsSync(path.join(ROOT, f)), '缺少文件 ' + f);
 
   // 图标尺寸与文件名一致（PNG IHDR）

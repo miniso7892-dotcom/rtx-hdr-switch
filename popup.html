@@ -4,223 +4,312 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>RTX HDR 开关</title>
+  <title data-i18n="app.name">RTX HDR 开关</title>
+  <link rel="stylesheet" href="fonts/fonts.css">
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <header class="top">
-    <h1>RTX HDR 开关</h1>
-    <p class="note">关闭时该视频的 RTX 超分也会一起关闭（Chrome 限制）</p>
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 128 128" aria-hidden="true">
+        <rect x="0" y="0" width="128" height="128" rx="14" class="logo-bg"></rect>
+        <rect x="21" y="33" width="86" height="62" class="logo-screen"></rect>
+        <rect x="16" y="28" width="48" height="72" class="logo-lit"></rect>
+        <rect x="58" y="14" width="13" height="100" class="logo-bar"></rect>
+      </svg>
+      <h1 data-i18n="app.name">RTX HDR 开关</h1>
+    </div>
+    <div class="seg seg-dark" role="radiogroup" data-i18n-attr="aria-label:popup.lang">
+      <label><input type="radio" name="lang" value="zh"><span>中</span></label>
+      <label><input type="radio" name="lang" value="en"><span>EN</span></label>
+      <label><input type="radio" name="lang" value="auto"><span data-i18n="popup.langAuto">自动</span></label>
+    </div>
   </header>
 
-  <section class="card" id="video-card">
-    <div id="video-panel" hidden>
-      <div class="status">
-        <div aria-live="polite" aria-atomic="true">
-          <div class="big" id="state-big">HDR 开</div>
-          <div class="reason" id="state-reason"></div>
-        </div>
-        <span class="dot" id="state-dot" aria-hidden="true"></span>
-      </div>
-      <div class="actions">
-        <button type="button" class="btn primary" id="btn-toggle">切换</button>
-        <button type="button" class="btn" id="btn-forget">清除此视频记忆</button>
-      </div>
-      <div class="vnote" id="video-note" hidden></div>
-      <div class="key" id="video-key"></div>
-      <div class="luma" id="video-luma"></div>
-    </div>
-    <div class="message" id="video-message" aria-live="polite">正在读取当前页面…</div>
-  </section>
+  <nav class="tabs" role="tablist" data-i18n-attr="aria-label:popup.tabs">
+    <button type="button" role="tab" id="tab-video" data-tab="video" aria-controls="panel-video" aria-selected="true" data-i18n="tab.video">视频</button>
+    <button type="button" role="tab" id="tab-nv" data-tab="nv" aria-controls="panel-nv" aria-selected="false" tabindex="-1">NVIDIA</button>
+    <button type="button" role="tab" id="tab-rules" data-tab="rules" aria-controls="panel-rules" aria-selected="false" tabindex="-1" data-i18n="tab.rules">规则</button>
+  </nav>
 
-  <section class="group nv" aria-labelledby="nv-title">
-    <h2 id="nv-title" class="inline">NVIDIA 视频设置（全局）</h2>
-    <p class="note nv-note">直接改 NVIDIA App 里的 RTX 视频增强设置，对所有视频生效</p>
-
-    <div class="message" id="nv-message" aria-live="polite">正在连接本地组件…</div>
-    <div class="nv-missing" id="nv-missing" hidden>
-      <a id="nv-install" href="https://github.com/miniso7892-dotcom/rtx-hdr-switch#nvidia-settings-panel" target="_blank" rel="noopener">安装方法</a>
-    </div>
-
-    <div id="nv-panel" hidden>
-      <p class="hint nv-app-hint">NVIDIA App 开着时，要离开再进入它的「视频」页才会显示新值；在旧页面上调整会把这里的修改改回去。</p>
-      <div class="row">
-        <span class="nv-label" id="nv-hdr-label">HDR</span>
-        <span class="nv-right">
-          <span class="nv-state"><span class="dot" id="nv-hdr-dot" aria-hidden="true"></span><span id="nv-hdr-state">状态：未激活</span></span>
-          <label class="switch" title="RTX 视频 HDR 开/关">
-            <input type="checkbox" id="nv-hdr" role="switch" aria-labelledby="nv-hdr-label" aria-describedby="nv-hdr-state">
-            <span class="slider" aria-hidden="true"></span>
-          </label>
-        </span>
-      </div>
-      <div class="nv-reason" id="nv-hdr-reason" role="status" hidden></div>
-
-      <div class="nv-range" id="nv-peak-wrap">
-        <div class="row">
-          <label for="nv-peak-num">最高亮度（尼特）</label>
-          <input type="number" id="nv-peak-num" step="1" inputmode="numeric">
-        </div>
-        <input type="range" id="nv-peak" step="10" aria-label="最高亮度（尼特）">
-        <div class="nv-hint" id="nv-peak-hint" hidden>实测驱动输出上限约 1000 尼特</div>
-      </div>
-      <div class="nv-range">
-        <div class="row">
-          <label for="nv-middleGrey">中间灰（尼特）</label>
-          <output id="nv-middleGrey-out" for="nv-middleGrey" aria-hidden="true"></output>
-        </div>
-        <input type="range" id="nv-middleGrey" min="10" max="100" step="1">
-      </div>
-      <div class="nv-range">
-        <div class="row">
-          <label for="nv-contrast">对比度 (%)</label>
-          <output id="nv-contrast-out" for="nv-contrast" aria-hidden="true"></output>
-        </div>
-        <input type="range" id="nv-contrast" min="-100" max="100" step="1">
-      </div>
-      <div class="nv-range">
-        <div class="row">
-          <label for="nv-saturation">饱和度 (%)</label>
-          <output id="nv-saturation-out" for="nv-saturation" aria-hidden="true"></output>
-        </div>
-        <input type="range" id="nv-saturation" min="-100" max="100" step="1">
+  <main>
+    <!-- ================= 视频 ================= -->
+    <section class="panel" id="panel-video" role="tabpanel" aria-labelledby="tab-video">
+      <div class="notice" id="global-off" role="status" hidden>
+        <span id="global-off-text"></span>
+        <button type="button" class="btn small inv" id="global-off-on" data-i18n="video.globalOffOn">开启</button>
       </div>
 
-      <div class="nv-block">
-        <div class="row">
-          <label for="nv-vsr">超分辨率</label>
-          <select id="nv-vsr" aria-describedby="nv-vsr-state">
-            <option value="0">关</option>
-            <option value="5">自动</option>
-            <option value="1">手动·非常低</option>
-            <option value="2">手动·低</option>
-            <option value="3">手动·中</option>
-            <option value="4">手动·高</option>
-          </select>
+      <div class="state" id="video-panel" hidden>
+        <div class="state-top">
+          <span data-i18n="video.current">当前视频</span>
+          <span class="host" id="video-host"></span>
         </div>
-        <div class="nv-state nv-sub"><span class="dot" id="nv-vsr-dot" aria-hidden="true"></span><span id="nv-vsr-state">状态：未激活</span></div>
-        <div class="nv-reason" id="nv-vsr-reason" role="status" hidden></div>
-        <div class="row" id="nv-priority-row">
-          <span id="nv-priority-label">GPU 优先级</span>
-          <span class="seg" role="radiogroup" aria-labelledby="nv-priority-label">
-            <label><input type="radio" name="nv-priority" value="0"><span>低</span></label>
-            <label><input type="radio" name="nv-priority" value="1"><span>中</span></label>
-            <label><input type="radio" name="nv-priority" value="2"><span>高</span></label>
+        <div class="state-main" aria-live="polite" aria-atomic="true">
+          <span class="state-big" id="state-big">HDR</span>
+          <span class="state-word" id="state-word"></span>
+          <kbd class="state-key" id="state-key" hidden></kbd>
+        </div>
+        <div class="state-sub">
+          <span id="state-reason"></span>
+          <span id="state-extra"></span>
+        </div>
+      </div>
+      <div class="state state-msg" id="video-message" aria-live="polite" data-i18n="video.reading">正在读取当前页面…</div>
+
+      <div class="actions" id="video-actions" hidden>
+        <button type="button" class="btn primary" id="btn-toggle"></button>
+        <button type="button" class="btn" id="btn-forget" data-i18n="video.forget">清除记忆</button>
+      </div>
+      <p class="note warn" id="video-note" hidden></p>
+      <p class="note" id="video-luma" hidden></p>
+
+      <div class="rows">
+        <div class="row">
+          <label for="site-rule"><span data-i18n="video.site">本网站</span> <span class="host" id="site-host"></span></label>
+          <span class="select">
+            <select id="site-rule">
+              <option value="" data-i18n="site.follow">跟随规则</option>
+              <option value="on" data-i18n="site.on">总是开 HDR</option>
+              <option value="off" data-i18n="site.off">总是关 HDR</option>
+            </select>
           </span>
         </div>
-        <label class="check" id="nv-indicator-row"><input type="checkbox" id="nv-indicator"> 在视频上显示状态指示器</label>
-      </div>
-
-      <div class="nv-block">
         <div class="row">
-          <label for="nv-preset">预设</label>
-          <select id="nv-preset" class="nv-wide"></select>
+          <label for="auto-mode" data-i18n="video.auto">白底自动检测</label>
+          <span class="select">
+            <select id="auto-mode">
+              <option value="disable" data-i18n="autoMode.disable">只自动关闭</option>
+              <option value="both" data-i18n="autoMode.both">自动开关</option>
+              <option value="off" data-i18n="autoMode.off">关闭</option>
+            </select>
+          </span>
         </div>
-        <div class="nv-actions">
-          <button type="button" class="btn small" id="nv-apply">应用</button>
-          <button type="button" class="btn small" id="nv-save" aria-expanded="false" aria-controls="nv-save-form">保存为预设…</button>
-          <button type="button" class="btn small" id="nv-delete">删除</button>
+        <div class="row">
+          <span id="sensitivity-label" data-i18n="video.sensitivity">灵敏度</span>
+          <span class="seg" id="sensitivity" role="radiogroup" aria-labelledby="sensitivity-label">
+            <label><input type="radio" name="sensitivity" value="low"><span data-i18n="level.low">低</span></label>
+            <label><input type="radio" name="sensitivity" value="medium"><span data-i18n="level.medium">中</span></label>
+            <label><input type="radio" name="sensitivity" value="high"><span data-i18n="level.high">高</span></label>
+          </span>
         </div>
-        <div class="nv-save-form" id="nv-save-form" hidden>
-          <input type="text" id="nv-preset-name" maxlength="24" aria-label="预设名称" placeholder="预设名称" enterkeyhint="done" autocomplete="off">
-          <button type="button" class="btn small" id="nv-save-ok">保存</button>
-          <button type="button" class="btn small" id="nv-save-cancel">取消</button>
+        <div class="row">
+          <span class="label-stack"><span id="night-label" data-i18n="video.night">夜间护眼</span><span class="sub" id="night-range"></span></span>
+          <label class="switch">
+            <input type="checkbox" id="night-enabled" role="switch" aria-labelledby="night-label">
+            <span class="track" aria-hidden="true"></span>
+          </label>
+        </div>
+        <div class="row">
+          <label for="eye-minutes" class="label-stack"><span data-i18n="video.eye">看久提醒</span><span class="sub" id="eye-sub"></span></label>
+          <span class="num-unit">
+            <input type="number" id="eye-minutes" min="0" max="600" step="5" inputmode="numeric">
+            <span data-i18n="unit.minutes">分钟</span>
+          </span>
         </div>
       </div>
-    </div>
-    <div class="nv-msg" id="nv-msg" role="status" aria-live="polite"></div>
-  </section>
 
-  <section class="group">
-    <div class="row">
-      <label for="site-rule">本网站 <span class="host" id="site-host"></span></label>
-      <select id="site-rule">
-        <option value="">跟随规则</option>
-        <option value="on">总是开 HDR</option>
-        <option value="off">总是关 HDR</option>
-      </select>
-    </div>
-  </section>
+      <footer class="panel-foot">
+        <span id="foot-auto-key"></span>
+        <span id="foot-version"></span>
+      </footer>
+    </section>
 
-  <section class="group">
-    <h2>自动检测白底/高亮视频</h2>
-    <div class="row">
-      <label for="auto-mode">模式</label>
-      <select id="auto-mode">
-        <option value="off">关闭</option>
-        <option value="disable">只自动关闭（推荐）</option>
-        <option value="both">自动开关</option>
-      </select>
-    </div>
-    <div class="row">
-      <label for="sensitivity">灵敏度</label>
-      <select id="sensitivity">
-        <option value="low">低</option>
-        <option value="medium">中</option>
-        <option value="high">高</option>
-      </select>
-    </div>
-  </section>
+    <!-- ================= NVIDIA ================= -->
+    <section class="panel" id="panel-nv" role="tabpanel" aria-labelledby="tab-nv" hidden>
+      <div class="state state-msg" id="nv-message" aria-live="polite" data-i18n="nv.connecting">正在连接本地组件…</div>
+      <div class="nv-missing" id="nv-missing" role="status" hidden>
+        <p id="nv-missing-text"></p>
+        <a id="nv-install" href="https://github.com/miniso7892-dotcom/rtx-hdr-switch#nvidia-settings-panel" target="_blank" rel="noopener" data-i18n="nv.install">安装方法</a>
+      </div>
 
-  <section class="group">
-    <div class="row">
-      <h2 class="inline">夜间护眼</h2>
-      <label class="switch" title="夜间时段内默认关闭 HDR">
-        <input type="checkbox" id="night-enabled" role="switch">
-        <span class="slider" aria-hidden="true"></span>
-        <span class="sr">启用夜间护眼</span>
-      </label>
-    </div>
-    <div class="row">
-      <label for="night-start">时段</label>
-      <span class="times">
-        <input type="time" id="night-start" required>
-        <span class="dash">至</span>
-        <input type="time" id="night-end" required aria-label="结束时间">
-      </span>
-    </div>
-    <div class="row">
-      <label for="nv-night-preset">夜间套用 NVIDIA 预设</label>
-      <select id="nv-night-preset" class="nv-pick" aria-describedby="nv-schedule-hint"></select>
-    </div>
-    <div class="row">
-      <label for="nv-day-preset">其余时间套用</label>
-      <select id="nv-day-preset" class="nv-pick" aria-describedby="nv-schedule-hint"></select>
-    </div>
-    <p class="hint" id="nv-schedule-hint">按上面的时段自动切换，与夜间护眼开关无关</p>
-  </section>
+      <div id="nv-panel" hidden>
+        <div class="row row-hdr">
+          <span class="label-stack"><span class="strong" id="nv-hdr-label" data-i18n="nv.hdr">RTX 视频 HDR</span><span class="sub" id="nv-hdr-state"></span></span>
+          <label class="switch">
+            <input type="checkbox" id="nv-hdr" role="switch" aria-labelledby="nv-hdr-label" aria-describedby="nv-hdr-state">
+            <span class="track" aria-hidden="true"></span>
+          </label>
+        </div>
+        <p class="note warn" id="nv-hdr-reason" role="status" hidden></p>
 
-  <section class="group">
-    <h2>连续观看提醒</h2>
-    <div class="row">
-      <label for="eye-minutes">提醒间隔（分钟，0 = 关闭）</label>
-      <input type="number" id="eye-minutes" min="0" max="600" step="5" inputmode="numeric">
-    </div>
-    <label class="check"><input type="checkbox" id="eye-autooff"> 到时自动切回 SDR</label>
-  </section>
+        <section class="sdr" aria-labelledby="sdr-title">
+          <div class="sdr-top">
+            <h2 id="sdr-title" data-i18n="sdr.title">WINDOWS SDR 亮度</h2>
+            <button type="button" class="link" id="sdr-read" data-i18n="sdr.read">读取</button>
+          </div>
+          <span class="select select-dark" id="sdr-display-wrap" hidden>
+            <select id="sdr-display" aria-label="显示器" data-i18n-attr="aria-label:sdr.display"></select>
+          </span>
+          <p class="sdr-empty" id="sdr-empty" data-i18n="sdr.empty">读取当前显示器的 SDR 亮度，给出对应的建议值。</p>
+          <div class="sdr-body" id="sdr-body" hidden>
+            <div class="sdr-read">
+              <span class="sdr-nits" id="sdr-nits">—</span>
+              <span class="sdr-sub" id="sdr-sub"></span>
+            </div>
+            <div class="sdr-sugs" id="sdr-sugs">
+              <label class="sug"><input type="checkbox" id="sug-mg" checked><span class="sug-name" data-i18n="nv.middleGrey">中间灰</span><span class="sug-cur" id="sug-mg-cur"></span><span class="sug-new" id="sug-mg-new"></span></label>
+              <label class="sug"><input type="checkbox" id="sug-peak" checked><span class="sug-name" data-i18n="nv.peak">最高亮度</span><span class="sug-cur" id="sug-peak-cur"></span><span class="sug-new" id="sug-peak-new"></span></label>
+              <label class="sug"><input type="checkbox" id="sug-con" checked><span class="sug-name" data-i18n="nv.contrast">对比度</span><span class="sug-cur" id="sug-con-cur"></span><span class="sug-new" id="sug-con-new"></span></label>
+            </div>
+          </div>
+          <p class="sdr-msg" id="sdr-msg" role="status"></p>
+          <div class="sdr-actions" id="sdr-actions" hidden>
+            <button type="button" class="btn accent" id="sdr-sync" data-i18n="sdr.sync">一键同步</button>
+            <label class="check check-dark"><input type="checkbox" id="sdr-follow"><span data-i18n="sdr.follow">跟随 SDR 亮度</span></label>
+          </div>
+        </section>
 
-  <section class="group">
-    <div class="row">
-      <h2 class="inline">默认（没有任何规则时）</h2>
-      <span class="seg" role="radiogroup" aria-label="默认状态">
-        <label><input type="radio" name="default-state" value="on"><span>开</span></label>
-        <label><input type="radio" name="default-state" value="off"><span>关</span></label>
-      </span>
-    </div>
-  </section>
+        <div class="sliders">
+          <div class="slider-row" id="nv-peak-wrap">
+            <label for="nv-peak" data-i18n="nv.peak">最高亮度</label>
+            <input type="range" id="nv-peak" step="10">
+            <input type="number" class="val" id="nv-peak-num" step="1" inputmode="numeric" aria-label="最高亮度（尼特）" data-i18n-attr="aria-label:nv.peakNits">
+          </div>
+          <p class="note" id="nv-peak-hint" hidden data-i18n="nv.peakHint">超过约 1000 尼特后驱动实际输出不再变亮</p>
+          <div class="slider-row">
+            <label for="nv-middleGrey" data-i18n="nv.middleGrey">中间灰</label>
+            <input type="range" id="nv-middleGrey" min="10" max="100" step="1">
+            <output class="val" id="nv-middleGrey-out" for="nv-middleGrey" aria-hidden="true"></output>
+          </div>
+          <div class="slider-row">
+            <label for="nv-contrast" data-i18n="nv.contrast">对比度</label>
+            <input type="range" id="nv-contrast" min="-100" max="100" step="1">
+            <output class="val" id="nv-contrast-out" for="nv-contrast" aria-hidden="true"></output>
+          </div>
+          <div class="slider-row">
+            <label for="nv-saturation" data-i18n="nv.saturation">饱和度</label>
+            <input type="range" id="nv-saturation" min="-100" max="100" step="1">
+            <output class="val" id="nv-saturation-out" for="nv-saturation" aria-hidden="true"></output>
+          </div>
+        </div>
 
-  <section class="group">
-    <h2>其他</h2>
-    <label class="check"><input type="checkbox" id="remember-manual"> 手动切换后记住此视频</label>
-    <label class="check"><input type="checkbox" id="show-osd"> 显示屏幕提示</label>
-  </section>
+        <div class="row row-vsr">
+          <span class="label-stack"><label for="nv-vsr" data-i18n="nv.vsrShort">超分</label><span class="sub" id="nv-vsr-state"></span></span>
+          <span class="select">
+            <select id="nv-vsr" aria-describedby="nv-vsr-state">
+              <option value="5" data-i18n="vsr.auto">自动</option>
+              <option value="0" data-i18n="vsr.off">关</option>
+              <option value="1" data-i18n="vsr.m1">手动·非常低</option>
+              <option value="2" data-i18n="vsr.m2">手动·低</option>
+              <option value="3" data-i18n="vsr.m3">手动·中</option>
+              <option value="4" data-i18n="vsr.m4">手动·高</option>
+            </select>
+          </span>
+          <span class="push" id="nv-priority-row">
+            <span id="nv-priority-label">GPU</span>
+            <span class="seg" role="radiogroup" aria-labelledby="nv-priority-label">
+              <label><input type="radio" name="nv-priority" value="0"><span data-i18n="level.low">低</span></label>
+              <label><input type="radio" name="nv-priority" value="1"><span data-i18n="level.medium">中</span></label>
+              <label><input type="radio" name="nv-priority" value="2"><span data-i18n="level.high">高</span></label>
+            </span>
+          </span>
+        </div>
+        <p class="note warn" id="nv-vsr-reason" role="status" hidden></p>
+        <label class="check row-check" id="nv-indicator-row"><input type="checkbox" id="nv-indicator"><span data-i18n="nv.indicator">在视频上显示 NVIDIA 状态指示器</span></label>
+        <p class="note" id="nv-app-hint" data-i18n="nv.appHint">NVIDIA App 开着时，要离开再进入它的「视频」页才会显示新值；在旧页面上调整会把这里的修改改回去。</p>
+      </div>
+      <p class="nv-msg" id="nv-msg" role="status" aria-live="polite"></p>
 
-  <section class="group">
-    <h2>快捷键</h2>
-    <ul class="shortcuts" id="shortcuts"></ul>
-    <button type="button" class="btn small" id="btn-shortcuts">修改快捷键</button>
-  </section>
+      <footer class="panel-foot presets" id="nv-presets">
+        <div class="presets-row">
+          <label for="nv-preset" data-i18n="nv.preset">预设</label>
+          <span class="select select-dark grow">
+            <select id="nv-preset"></select>
+          </span>
+          <button type="button" class="btn small accent" id="nv-apply" data-i18n="nv.apply">应用</button>
+          <button type="button" class="btn small inv-line" id="nv-save" aria-expanded="false" aria-controls="nv-save-form" data-i18n="nv.save">另存为…</button>
+          <button type="button" class="btn small inv-line" id="nv-delete" data-i18n="nv.delete">删除</button>
+        </div>
+        <div class="presets-row" id="nv-save-form" hidden>
+          <input type="text" id="nv-preset-name" maxlength="24" aria-label="预设名称" placeholder="预设名称" data-i18n-attr="aria-label:nv.presetName;placeholder:nv.presetName" enterkeyhint="done" autocomplete="off">
+          <button type="button" class="btn small accent" id="nv-save-ok" data-i18n="nv.saveOk">保存</button>
+          <button type="button" class="btn small inv-line" id="nv-save-cancel" data-i18n="common.cancel">取消</button>
+        </div>
+      </footer>
+    </section>
 
+    <!-- ================= 规则 ================= -->
+    <section class="panel" id="panel-rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+      <section class="block theme" aria-labelledby="theme-title">
+        <div class="block-head">
+          <h2 id="theme-title" data-i18n="theme.title">主题色</h2>
+          <span class="theme-current"><span id="theme-name"></span> <span class="mono" id="theme-hex"></span></span>
+        </div>
+        <div class="swatches" id="theme-swatches"></div>
+        <div class="theme-custom">
+          <label class="color-pick"><input type="color" id="theme-custom" aria-label="自定义颜色" data-i18n-attr="aria-label:theme.custom"><span data-i18n="theme.custom">自定义颜色</span></label>
+          <span class="theme-preview" aria-hidden="true">
+            <span class="tp-icon">
+              <svg class="logo" viewBox="0 0 128 128">
+                <rect x="0" y="0" width="128" height="128" rx="14" class="logo-bg"></rect>
+                <rect x="21" y="33" width="86" height="62" class="logo-screen"></rect>
+                <rect x="16" y="28" width="48" height="72" class="logo-lit"></rect>
+                <rect x="58" y="14" width="13" height="100" class="logo-bar"></rect>
+              </svg>
+              <span class="tp-badge">HDR</span>
+            </span>
+            <span class="tp-label" data-i18n="theme.toolbar">工具栏</span>
+          </span>
+        </div>
+      </section>
+
+      <div class="row">
+        <span id="default-label" data-i18n="rules.default">没有规则时</span>
+        <span class="seg" role="radiogroup" aria-labelledby="default-label">
+          <label><input type="radio" name="default-state" value="on"><span data-i18n="rules.defaultOn">开 HDR</span></label>
+          <label><input type="radio" name="default-state" value="off"><span data-i18n="rules.defaultOff">关 HDR</span></label>
+        </span>
+      </div>
+
+      <div class="row row-tall">
+        <span class="label-stack"><span id="hdr-only-label" data-i18n="rules.hdrOnly">只关 HDR，保留超分</span><span class="sub" id="hdr-only-desc" data-i18n="rules.hdrOnlyDesc">关的是 NVIDIA 全局 HDR：同时播放的其他视频也会变成 SDR</span></span>
+        <label class="switch">
+          <input type="checkbox" id="hdr-only" role="switch" aria-labelledby="hdr-only-label" aria-describedby="hdr-only-desc">
+          <span class="track" aria-hidden="true"></span>
+        </label>
+      </div>
+      <p class="note warn" id="hdr-only-status" role="status" hidden></p>
+
+      <div class="row">
+        <span class="label-stack"><span id="night-time-label" data-i18n="rules.nightTime">夜间时段</span></span>
+        <span class="times">
+          <input type="time" id="night-start" required aria-labelledby="night-time-label">
+          <span class="dash" data-i18n="common.to">至</span>
+          <input type="time" id="night-end" required aria-label="结束时间" data-i18n-attr="aria-label:rules.nightEnd">
+        </span>
+      </div>
+      <div class="row">
+        <label for="nv-night-preset" data-i18n="rules.nightPreset">夜间套用预设</label>
+        <span class="select"><select id="nv-night-preset" aria-describedby="nv-schedule-hint"></select></span>
+      </div>
+      <div class="row">
+        <label for="nv-day-preset" data-i18n="rules.dayPreset">其余时间套用</label>
+        <span class="select"><select id="nv-day-preset" aria-describedby="nv-schedule-hint"></select></span>
+      </div>
+      <p class="note" id="nv-schedule-hint"></p>
+
+      <label class="check row-check"><input type="checkbox" id="eye-autooff"><span data-i18n="rules.eyeAutoOff">看久提醒到时自动切回 SDR</span></label>
+      <label class="check row-check"><input type="checkbox" id="remember-manual"><span data-i18n="rules.remember">手动切换后记住此视频</span></label>
+      <label class="check row-check"><input type="checkbox" id="show-osd"><span data-i18n="rules.osd">切换时显示屏幕提示</span></label>
+      <label class="check row-check"><input type="checkbox" id="player-button"><span data-i18n="rules.playerButton">在播放器控制栏显示 HDR 按钮</span></label>
+
+      <section class="block keys" aria-labelledby="keys-title">
+        <div class="block-head">
+          <h2 id="keys-title" data-i18n="keys.title">快捷键</h2>
+          <button type="button" class="btn small" id="btn-shortcuts" data-i18n="keys.change">修改</button>
+        </div>
+        <ul class="shortcuts" id="shortcuts"></ul>
+      </section>
+
+      <footer class="panel-foot split">
+        <button type="button" id="btn-export" data-i18n="backup.export">导出备份</button>
+        <button type="button" id="btn-import" data-i18n="backup.import">导入备份</button>
+      </footer>
+    </section>
+  </main>
+
+  <script src="i18n.js"></script>
   <script src="lib.js"></script>
   <script src="popup.js"></script>
 </body>

@@ -7,6 +7,9 @@
 (function (root) {
   'use strict';
 
+  // 界面文字表（i18n.js）：浏览器里先于 lib.js 加载，Node 里直接 require
+  const I = root.RtxHdrI18n || (typeof require === 'function' ? require('./i18n.js') : null);
+
   const STATES = ['on', 'off'];
   const AUTO_MODES = ['off', 'disable', 'both'];
   const SENSITIVITIES = ['low', 'medium', 'high'];
@@ -22,9 +25,24 @@
     night: { enabled: false, start: '23:00', end: '07:00' },
     eye: { minutes: 45, autoOff: false },
     osd: true,
+    playerButton: true,
+    hdrOnly: false,
     sites: {},
-    nv: { presets: [], nightPresetId: null, dayPresetId: null }
+    ui: { lang: 'auto', accent: '#A98BFF' },
+    nv: { presets: [], nightPresetId: null, dayPresetId: null, followSdr: false, displayId: null }
   });
+
+  // 主题色预设（弹窗「规则」里的色块）；默认薰衣紫
+  const ACCENTS = deepFreeze([
+    { id: 'lime', hex: '#C8FF2E' },
+    { id: 'yellow', hex: '#FFE600' },
+    { id: 'orange', hex: '#FF7A1A' },
+    { id: 'pink', hex: '#FF5CA8' },
+    { id: 'cyan', hex: '#22E1FF' },
+    { id: 'lavender', hex: '#A98BFF' }
+  ]);
+  const DEFAULT_ACCENT = '#A98BFF';
+  const UI_LANGS = ['auto', 'zh', 'en'];
 
   const REASON_TEXT = Object.freeze({
     manual: '手动',
@@ -179,6 +197,8 @@
       }
     }
 
+    const ui = isObj(s.ui) ? s.ui : {};
+
     return {
       defaultState: pick(defaultState, STATES, d.defaultState),
       rememberManual: bool(s.rememberManual, d.rememberManual),
@@ -192,9 +212,33 @@
       },
       eye: { minutes: minutes, autoOff: bool(eye.autoOff, d.eye.autoOff) },
       osd: bool(s.osd, d.osd),
+      playerButton: bool(s.playerButton, d.playerButton),
+      hdrOnly: bool(s.hdrOnly, d.hdrOnly),
       sites: sites,
+      ui: { lang: pick(ui.lang, UI_LANGS, d.ui.lang), accent: normAccent(ui.accent) },
       nv: normNv(s.nv)
     };
+  }
+
+  // '#rgb' / '#rrggbb'（不区分大小写）→ '#RRGGBB'；不合法用默认主题色
+  function normAccent(v) {
+    const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(v == null ? '' : v).trim());
+    if (!m) return DEFAULT_ACCENT;
+    const h = m[1].length === 3 ? m[1].replace(/./g, function (c) { return c + c; }) : m[1];
+    return '#' + h.toUpperCase();
+  }
+
+  // 主题色上用的文字色：按相对亮度选黑字或白字（取对比度更高的那个，分界约 0.18）；
+  // fg：主题色放在黑底上当文字 / 线条用时的颜色，主题色太暗就退成白色
+  function accentInk(hex) {
+    const accent = normAccent(hex);
+    const lin = [1, 3, 5].map(function (i) {
+      const c = parseInt(accent.slice(i, i + 2), 16) / 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    });
+    const lum = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+    const light = lum > 0.18;
+    return { accent: accent, on: light ? '#0A0A0A' : '#FAFAFA', fg: light ? accent : '#FAFAFA', lum: lum };
   }
 
   // 数字或数字字符串 → 夹到范围内的整数；非法返回 null
@@ -249,7 +293,14 @@
     }
     // 指向已删除预设的时段设置变回「不切换」
     const ref = function (id) { return typeof id === 'string' && ids.has(id) ? id : null; };
-    return { presets: presets, nightPresetId: ref(v.nightPresetId), dayPresetId: ref(v.dayPresetId) };
+    const displayId = typeof v.displayId === 'string' && v.displayId && v.displayId.length <= 512 ? v.displayId : null;
+    return {
+      presets: presets,
+      nightPresetId: ref(v.nightPresetId),
+      dayPresetId: ref(v.dayPresetId),
+      followSdr: v.followSdr === true,
+      displayId: displayId
+    };
   }
 
   // 快捷键「开/关 自动检测」：在 'off' 与上次使用的模式之间切换
@@ -452,13 +503,28 @@
     return { state: s.defaultState === 'off' ? 'off' : 'on', reason: 'default' };
   }
 
-  function reasonText(reason) {
-    return REASON_TEXT[reason] || '';
+  // 界面文字：lang 省略时是中文（和旧版本的输出一致）
+  function tr(lang, key, params) {
+    return I ? I.t(lang || 'zh', key, params) : key;
   }
 
-  function osdText(state, reason) {
-    const r = REASON_OSD[reason];
-    return 'RTX HDR：' + (state === 'off' ? '关' : '开') + (r ? '（' + r + '）' : '');
+  // 半角 / 全角括号：中文「（…）」，英文「 (…)」
+  function paren(lang, text) {
+    return lang === 'en' ? ' (' + text + ')' : '（' + text + '）';
+  }
+
+  function reasonText(reason, lang) {
+    return REASON_TEXT[reason] ? tr(lang, 'reason.' + reason) : '';
+  }
+
+  function osdText(state, reason, lang) {
+    const st = tr(lang, state === 'off' ? 'osd.off' : 'osd.on');
+    const r = !REASON_OSD[reason] ? '' : reason === 'auto' ? tr(lang, 'osd.reason.auto') : tr(lang, 'reason.' + reason);
+    return r ? tr(lang, 'osd.stateReason', { state: st, reason: r }) : tr(lang, 'osd.state', { state: st });
+  }
+
+  function autoModeText(mode, lang) {
+    return AUTO_MODE_TEXT[mode] ? tr(lang, 'autoMode.' + mode) : '';
   }
 
   // ---------- 自动检测 ----------
@@ -596,9 +662,9 @@
     return list.slice(0, list.length - limit).map(function (x) { return x[0]; });
   }
 
-  function formatLuma(mean, white) {
+  function formatLuma(mean, white, lang) {
     if (typeof mean !== 'number' || typeof white !== 'number' || !isFinite(mean) || !isFinite(white)) return '';
-    return '画面亮度 ' + Math.round(mean * 100) + '% · 白色占比 ' + Math.round(white * 100) + '%';
+    return tr(lang, 'luma', { mean: Math.round(mean * 100), white: Math.round(white * 100) });
   }
 
   // ---------- 关闭用的滤镜 ----------
@@ -664,11 +730,11 @@
     return typeof v.at === 'number' && isFinite(v.at) && v.at > 0 ? v.at : 1;
   }
 
-  function eyeReminderText(minutes, autoOff, shortcut) {
-    const head = '已连续观看 HDR ' + minutes + ' 分钟';
-    if (!autoOff) return head + '，休息一下眼睛吧';
-    return head + '，已切回 SDR，休息一下眼睛吧' +
-      (shortcut ? '（按 ' + shortcut + ' 可恢复 HDR）' : '（可在扩展弹窗里恢复 HDR）');
+  function eyeReminderText(minutes, autoOff, shortcut, lang) {
+    const head = tr(lang, 'eye.head', { minutes: minutes });
+    if (!autoOff) return head + tr(lang, 'eye.rest');
+    return head + tr(lang, 'eye.restOff') +
+      (shortcut ? tr(lang, 'eye.restoreKey', { key: shortcut }) : tr(lang, 'eye.restorePopup'));
   }
 
   // ---------- NVIDIA 设置 ----------
@@ -849,15 +915,16 @@
   }
 
   // 「预设 N」里第一个没被占用的 N
-  function nvDefaultPresetName(presets) {
+  function nvDefaultPresetName(presets, lang) {
     const used = new Set(Array.isArray(presets) ? presets.filter(isObj).map(function (p) { return p.name; }) : []);
     let n = 1;
-    while (used.has('预设 ' + n)) n++;
-    return '预设 ' + n;
+    while (used.has(tr(lang, 'nv.presetDefault', { n: n }))) n++;
+    return tr(lang, 'nv.presetDefault', { n: n });
   }
 
-  function nvHdrErrorText(code) {
-    return NV_HDR_ERROR_TEXT[code] || (code ? 'HDR 不可用（错误 ' + code + '）' : '');
+  function nvHdrErrorText(code, lang) {
+    if (NV_HDR_ERROR_TEXT[code]) return tr(lang, 'nv.hdrErr.' + code);
+    return code ? tr(lang, 'nv.hdrErr.other', { code: code }) : '';
   }
 
   // chrome.runtime.lastError.message → 统一的错误回复
@@ -870,35 +937,167 @@
     return nvFail(code, m ? { message: m } : undefined);
   }
 
-  function nvErrorText(err) {
+  function nvErrorText(err, lang) {
     const e = isObj(err) ? err : { code: err };
     switch (e.code) {
-      case 'host-missing': return '未安装本地组件，无法读写 NVIDIA 设置。';
-      // 只在扩展 ID 不在本地组件清单的 allowed_origins 里时出现，重新运行 install.cmd 解决不了
-      case 'host-forbidden': return '本地组件只接受仓库里这份扩展（ID 由 manifest.json 的 key 决定）。请用仓库文件夹以「加载已解压的扩展程序」方式安装，不要用删掉 key 或重新打包的副本。';
-      case 'host-exit': return '本地组件意外退出。';
-      case 'host-error': return '无法与本地组件通信。';
-      case 'timeout': return '本地组件没有响应。';
-      case 'protocol': return '本地组件版本不匹配，请更新后重新运行 install.cmd。';
-      case 'no-dll': return '未找到 NVIDIA App（nvcpl.dll），请先安装 NVIDIA App。';
-      case 'init': return 'NVIDIA 接口初始化失败。';
-      case 'api': return 'NVIDIA 接口调用失败' + (e.rc != null ? '（rc=' + e.rc + '）' : '') + '。';
-      case 'range': return '数值超出范围' + (e.field ? '（' + (NV_FIELD_TEXT[e.field] || e.field) + '）' : '') + '。';
-      case 'unsupported': return e.field === 'vsr' ? '此显卡或驱动不支持 RTX 视频超分辨率。'
-        : e.field === 'hdr' ? '此显卡或驱动不支持 RTX 视频 HDR。'
-          : e.field === 'vsr.priority' ? '此驱动不支持 GPU 优先级设置。'
-            : e.field === 'indicator' ? '此驱动不支持状态指示器设置。' : '此显卡或驱动不支持该设置。';
-      case 'hdr-error': return nvHdrErrorText(e.errorCode) || 'HDR 当前不可用。';
-      case 'bad-request': return '请求格式错误。';
-      case 'internal': return '本地组件内部错误。';
-      default: return '未知错误' + (e.code ? '（' + e.code + '）' : '') + '。';
+      // host-forbidden 只在扩展 ID 不在本地组件清单的 allowed_origins 里时出现，重新运行 install.cmd 解决不了
+      case 'host-missing':
+      case 'host-forbidden':
+      case 'host-exit':
+      case 'host-error':
+      case 'timeout':
+      case 'protocol':
+      case 'old-host':
+      case 'no-dll':
+      case 'init':
+      case 'bad-request':
+      case 'internal':
+        return tr(lang, 'nv.err.' + e.code);
+      case 'api': return tr(lang, 'nv.err.api', { rc: e.rc != null ? paren(lang, 'rc=' + e.rc) : '' });
+      case 'range': {
+        const name = !e.field ? '' : NV_FIELD_TEXT[e.field] ? tr(lang, 'nv.field.' + e.field) : e.field;
+        return tr(lang, 'nv.err.range', { field: name ? paren(lang, name) : '' });
+      }
+      case 'unsupported':
+        return tr(lang, ['vsr', 'hdr', 'vsr.priority', 'indicator'].indexOf(e.field) >= 0 ? 'nv.err.unsupported.' + e.field : 'nv.err.unsupported');
+      case 'hdr-error': return nvHdrErrorText(e.errorCode, lang) || tr(lang, 'nv.err.hdr-error');
+      default: return tr(lang, 'nv.err.unknown', { code: e.code ? paren(lang, e.code) : '' });
     }
+  }
+
+  // ---------- Windows SDR 亮度 → 建议值 ----------
+
+  // sRGB 编码值 128/255 的线性亮度：让 RTX 视频 HDR 的 50% 灰和桌面上的 50% 灰一样亮
+  const K_MID = 0.2158;
+  const SUGGEST_CONTRAST = 25; // 伽马约 2.2，和 Windows 显示 SDR 内容的曲线接近
+  const SUGGEST_PEAK_CAP = 1000; // 驱动实测输出到约 1000 尼特为止
+
+  // 本地组件 display 命令里的一项 → 规范化对象；不合法返回 null
+  function nvNormDisplay(raw) {
+    if (!isObj(raw) || typeof raw.id !== 'string' || !raw.id) return null;
+    const nits = typeof raw.sdrWhiteNits === 'number' && isFinite(raw.sdrWhiteNits) && raw.sdrWhiteNits > 0 ? raw.sdrWhiteNits : null;
+    let slider = Number.isInteger(raw.sdrSlider) ? raw.sdrSlider : null;
+    if (slider === null && nits !== null) slider = Math.round((nits - 80) / 4);
+    return {
+      id: raw.id.slice(0, 512),
+      name: typeof raw.name === 'string' ? raw.name.slice(0, 64) : '',
+      hdrSupported: raw.hdrSupported === true,
+      hdrEnabled: raw.hdrEnabled === true,
+      sdrWhiteNits: nits,
+      sdrSlider: slider === null ? null : Math.min(100, Math.max(0, slider)),
+      bitsPerColor: Number.isInteger(raw.bitsPerColor) ? raw.bitsPerColor : null
+    };
+  }
+
+  // 记住的显示器 → 第一个开着 HDR 的 → 第一个
+  function nvPickDisplay(displays, id) {
+    const list = Array.isArray(displays) ? displays.map(nvNormDisplay).filter(Boolean) : [];
+    if (!list.length) return null;
+    return list.find(function (d) { return d.id === id; }) ||
+      list.find(function (d) { return d.hdrEnabled; }) || list[0];
+  }
+
+  /**
+   * 按 Windows SDR 白电平给出 RTX 视频 HDR 的建议值（不碰饱和度）：
+   * 中间灰 = SDR 白 × 0.2158（夹到 10..100），最高亮度 = min(上限, 1000)，对比度 +25。
+   * display 没开 HDR 或读不到白电平时返回 null；state 省略时最高亮度不按显卡范围夹
+   */
+  function nvSuggest(display, state) {
+    const d = nvNormDisplay(display);
+    if (!d || !d.hdrEnabled || d.sdrWhiteNits === null) return null;
+    const st = state == null ? null : nvNormState(state);
+    const mg = NV_RANGES.hdr.middleGrey;
+    let peak = SUGGEST_PEAK_CAP;
+    if (st) peak = Math.min(st.hdr.peakMax, Math.max(st.hdr.peakMin, Math.min(st.hdr.peakMax, SUGGEST_PEAK_CAP)));
+    return {
+      middleGrey: Math.min(mg.max, Math.max(mg.min, Math.round(d.sdrWhiteNits * K_MID))),
+      peak: peak,
+      contrast: SUGGEST_CONTRAST
+    };
+  }
+
+  // 中间灰快捷键：当前值 ± step，夹到 10..100；没变（已到头）时 changed 为 false
+  function nvMgStep(state, delta) {
+    const st = nvNormState(state);
+    if (!st) return null;
+    const r = NV_RANGES.hdr.middleGrey;
+    const value = Math.min(r.max, Math.max(r.min, st.hdr.middleGrey + (Number(delta) || 0)));
+    return { value: value, changed: value !== st.hdr.middleGrey };
+  }
+
+  // ---------- 备份 ----------
+
+  const BACKUP_FORMAT = 'rtx-hdr-switch-backup';
+  const BACKUP_VERSION = 1;
+
+  // storage.local 的全部内容 → 备份对象：设置（规范化过）+ 按视频的记忆；不含护眼状态、会话数据
+  function makeBackup(all, extVersion, nowMs) {
+    const src = isObj(all) ? all : {};
+    const videos = {};
+    for (const k of Object.keys(src)) {
+      if (k.indexOf(VIDEO_PREFIX) !== 0 || k.length <= VIDEO_PREFIX.length) continue;
+      const r = validRule(src[k]);
+      if (r) videos[k.slice(VIDEO_PREFIX.length)] = r;
+    }
+    return {
+      format: BACKUP_FORMAT,
+      version: BACKUP_VERSION,
+      exportedAt: new Date(typeof nowMs === 'number' ? nowMs : Date.now()).toISOString(),
+      extensionVersion: String(extVersion || ''),
+      settings: mergeSettings(src.settings),
+      videos: videos
+    };
+  }
+
+  /**
+   * 检查并规范化备份文件内容。成功：{ok, settings, videos: {key: {s,t}}, summary: {videos, presets, sites},
+   * exportedAt, extensionVersion}；失败：{ok:false, code:'invalid'|'newer'}。
+   * 视频记忆超过上限时只留最新的那些
+   */
+  function validateBackup(obj) {
+    if (!isObj(obj) || obj.format !== BACKUP_FORMAT || !Number.isInteger(obj.version)) return { ok: false, code: 'invalid' };
+    if (obj.version > BACKUP_VERSION) return { ok: false, code: 'newer' };
+    if (obj.version < 1 || !isObj(obj.settings)) return { ok: false, code: 'invalid' };
+    const settings = mergeSettings(obj.settings);
+    const videos = {};
+    if (isObj(obj.videos)) {
+      for (const k of Object.keys(obj.videos)) {
+        const r = validRule(obj.videos[k]);
+        if (r && k && k.length <= 2048) videos[k] = r;
+      }
+    }
+    const drop = pruneKeys(Object.keys(videos).map(function (k) { return [VIDEO_PREFIX + k, videos[k]]; }), MAX_VIDEO_ENTRIES);
+    for (const id of drop) delete videos[id.slice(VIDEO_PREFIX.length)];
+    return {
+      ok: true,
+      settings: settings,
+      videos: videos,
+      summary: { videos: Object.keys(videos).length, presets: settings.nv.presets.length, sites: Object.keys(settings.sites).length },
+      exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt.slice(0, 40) : '',
+      extensionVersion: typeof obj.extensionVersion === 'string' ? obj.extensionVersion.slice(0, 20) : ''
+    };
   }
 
   const api = Object.freeze({
     DEFAULT_SETTINGS: DEFAULT_SETTINGS,
+    ACCENTS: ACCENTS,
+    DEFAULT_ACCENT: DEFAULT_ACCENT,
+    UI_LANGS: UI_LANGS,
     REASON_TEXT: REASON_TEXT,
     AUTO_MODE_TEXT: AUTO_MODE_TEXT,
+    t: tr,
+    autoModeText: autoModeText,
+    normAccent: normAccent,
+    accentInk: accentInk,
+    K_MID: K_MID,
+    nvNormDisplay: nvNormDisplay,
+    nvPickDisplay: nvPickDisplay,
+    nvSuggest: nvSuggest,
+    nvMgStep: nvMgStep,
+    BACKUP_FORMAT: BACKUP_FORMAT,
+    BACKUP_VERSION: BACKUP_VERSION,
+    makeBackup: makeBackup,
+    validateBackup: validateBackup,
     THRESHOLDS: THRESHOLDS,
     VIDEO_PREFIX: VIDEO_PREFIX,
     MAX_VIDEO_ENTRIES: MAX_VIDEO_ENTRIES,

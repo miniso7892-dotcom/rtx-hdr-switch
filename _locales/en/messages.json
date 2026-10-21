@@ -1,0 +1,38 @@
+{
+  "extName": {
+    "message": "HDR Switch for RTX Video",
+    "description": "Extension name"
+  },
+  "extDescription": {
+    "message": "Turn NVIDIA RTX Video HDR on or off per video: shortcuts, auto-detect white videos, NVIDIA presets, SDR sync and eye care.",
+    "description": "Extension description"
+  },
+  "actionTitle": {
+    "message": "RTX HDR Switch",
+    "description": "Toolbar button tooltip"
+  },
+  "cmdToggleHdr": {
+    "message": "Toggle RTX HDR for the current video",
+    "description": "Command"
+  },
+  "cmdToggleAuto": {
+    "message": "Turn auto-detection of white videos on/off",
+    "description": "Command"
+  },
+  "cmdMgUp": {
+    "message": "NVIDIA middle grey +5",
+    "description": "Command"
+  },
+  "cmdMgDown": {
+    "message": "NVIDIA middle grey −5",
+    "description": "Command"
+  },
+  "cmdForgetVideo": {
+    "message": "Forget the current video",
+    "description": "Command"
+  },
+  "cmdNextPreset": {
+    "message": "Switch to the next NVIDIA preset",
+    "description": "Command"
+  }
+}

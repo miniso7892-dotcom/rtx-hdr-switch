@@ -1,5 +1,6 @@
-// 本地组件测试。运行：node native-host/test/host.test.mjs          （只读：不会改任何 NVIDIA 设置）
-//                       node native-host/test/host.test.mjs --live   （另加一次可逆写入：中间灰 +1 → 校验 → 恢复）
+// 本地组件测试。运行：node native-host/test/host.test.mjs          （只读：不会改任何 NVIDIA / Windows 设置）
+//                       node native-host/test/host.test.mjs --live   （另加可逆写入：中间灰 +1；hdrLease 关 HDR → 恢复；
+//                                                                     每个 live 测试开始时记下完整状态，结束时恢复并核对）
 // 只依赖 node 内置模块；先运行 native-host\build.cmd 生成 rtx_hdr_host.exe。
 
 import assert from 'node:assert/strict';
@@ -55,6 +56,7 @@ class HostProc {
       }
     });
     this.exit = new Promise(resolve => this.p.on('exit', code => resolve(code)));
+    this.stdioClosed = new Promise(resolve => this.p.on('close', () => resolve())); // 'exit' 可能早于 stderr 收完
     this.p.stdin.on('error', () => {}); // 进程已退出时写入会 EPIPE，测试自己判断
   }
   send(body) { this.p.stdin.write(frame(body)); }
@@ -69,7 +71,9 @@ class HostProc {
   async call(obj) { this.send(obj); return this.next(); }
   async close(ms = 10000) {
     this.p.stdin.end();
-    return withTimeout(this.exit, ms, 'host did not exit after stdin EOF');
+    const code = await withTimeout(this.exit, ms, 'host did not exit after stdin EOF');
+    await withTimeout(this.stdioClosed, ms, 'host stdio did not close'); // 之后 this.stderr 是完整的
+    return code;
   }
 }
 
@@ -150,6 +154,58 @@ function checkState(s) {
   assert.deepEqual(Object.keys(s).sort(), ['flags', 'hdr', 'indicator', 'vsr']);
 }
 
+// display 的一项；用户会改 SDR 亮度滑块，所以只核对形状、合理范围和换算关系
+function checkDisplay(d) {
+  assert.deepEqual(Object.keys(d).sort(), ['bitsPerColor', 'hdrEnabled', 'hdrSupported', 'id', 'name', 'sdrSlider', 'sdrWhiteNits']);
+  assert.equal(typeof d.id, 'string');
+  assert.ok(d.id.length > 0, 'id 非空');
+  assert.equal(typeof d.name, 'string');
+  for (const k of ['hdrSupported', 'hdrEnabled']) assert.ok(d[k] === null || typeof d[k] === 'boolean', k);
+  if (d.hdrEnabled === true) assert.equal(d.hdrSupported, true, '开着 HDR 的显示器必然支持 HDR');
+  if (d.sdrWhiteNits === null) {
+    assert.equal(d.sdrSlider, null, 'sdrSlider 与 sdrWhiteNits 一起为 null');
+  } else {
+    assert.equal(typeof d.sdrWhiteNits, 'number');
+    assert.ok(Math.abs(d.sdrWhiteNits * 10 - Math.round(d.sdrWhiteNits * 10)) < 1e-6, 'sdrWhiteNits 保留 1 位小数：' + d.sdrWhiteNits);
+    // HDR 开着时 Windows「SDR 内容亮度」滑块 0..100 对应 80..480 尼特
+    if (d.hdrEnabled) assert.ok(d.sdrWhiteNits >= 80 && d.sdrWhiteNits <= 480, 'sdrWhiteNits 80..480：' + d.sdrWhiteNits);
+    else assert.ok(d.sdrWhiteNits > 0 && d.sdrWhiteNits <= 1000, 'sdrWhiteNits：' + d.sdrWhiteNits);
+    assert.ok(Number.isInteger(d.sdrSlider) && d.sdrSlider >= 0 && d.sdrSlider <= 100, 'sdrSlider 0..100');
+    assert.equal(d.sdrSlider, Math.min(100, Math.max(0, Math.round((d.sdrWhiteNits - 80) / 4))), 'sdrSlider = round((nits − 80) / 4)');
+  }
+  assert.ok(d.bitsPerColor === null || (Number.isInteger(d.bitsPerColor) && d.bitsPerColor >= 1 && d.bitsPerColor <= 16), 'bitsPerColor');
+}
+
+// 兜底恢复：按测试前读到的完整状态写回 0x318 / 0x317 / 0x32F / 0x330，再用新进程读回核对；恢复不了就把测试前的状态存档。
+// indicator 会把 0x1 和 0x100 一起置位或清零：测试前只开了其中一位时用它写回会改动测试没碰过的那一位，
+// 这种情况不写 0x330，留给下面的「恢复失败」报告和备份文件，人工处理
+async function restoreBaseline(before) {
+  let after = null;
+  try {
+    after = (await once({ cmd: 'get' })).state;
+    if (!isDeepStrictEqual(stable(after), stable(before))) {
+      const bits = before.flags === null ? null : before.flags & 0x101;
+      const full = { cmd: 'set', commit: true,
+        hdr: { enabled: before.hdr.enabled, peak: before.hdr.peak, middleGrey: before.hdr.middleGrey, contrast: before.hdr.contrast, saturation: before.hdr.saturation },
+        vsr: { mode: before.vsr.mode, priority: before.vsr.priority === null ? undefined : before.vsr.priority },
+        indicator: bits === 0 || bits === 0x101 ? before.indicator : undefined };
+      const w = await once(full);
+      if (w.ok !== true) console.log('        兜底写回失败：' + JSON.stringify(w.error));
+      after = (await once({ cmd: 'get' })).state;
+    }
+  } catch (e) {
+    console.log('        兜底写回出错：' + (e && e.message));
+  }
+  let restored = false;
+  try { restored = isDeepStrictEqual(stable(after), stable(before)); } catch { restored = false; }
+  if (!restored) {
+    const backup = path.join(os.tmpdir(), 'rtx_hdr_host_live_backup.json');
+    fs.writeFileSync(backup, JSON.stringify(before, null, 2));
+    console.log('        !!! 恢复失败。测试前的状态：' + JSON.stringify(before) + '（已存到 ' + backup + '）');
+  }
+  return restored;
+}
+
 // ---------- 测试 ----------
 
 const tests = [];
@@ -203,10 +259,12 @@ test('hello 形状', async () => {
   assert.equal(r.ok, true);
   assert.equal(r.id, 7);
   assert.equal(r.host, 'rtx_hdr_host');
-  assert.equal(r.version, '1.1.0');
-  assert.equal(r.protocol, 1);
+  assert.equal(r.version, '1.2.0');
+  assert.equal(r.protocol, 1, '协议号不变：1.1 的扩展照常可用');
+  assert.deepEqual(r.caps, ['display', 'hdrLease'], 'caps：1.2 新增的命令');
   assert.ok(r.dll === null || /nvcpl\.dll$/i.test(r.dll), 'dll');
-  console.log('        dll: ' + r.dll);
+  assert.deepEqual(Object.keys(r).sort(), ['caps', 'dll', 'host', 'id', 'ok', 'protocol', 'version']);
+  console.log('        dll: ' + r.dll + '；caps: ' + JSON.stringify(r.caps));
 });
 
 test('get 形状', async () => {
@@ -215,6 +273,74 @@ test('get 形状', async () => {
   assert.equal(r.id, 'g');
   checkState(r.state);
   console.log('        state: ' + JSON.stringify(r.state));
+});
+
+test('display 形状（只读 Windows 显示器信息；不加载 nvcpl.dll）', async () => {
+  const h = new HostProc();
+  let first;
+  try {
+    first = await h.call({ cmd: 'display', id: 'd' });
+    assert.equal(first.ok, true, JSON.stringify(first.error));
+    assert.equal(first.id, 'd');
+    assert.deepEqual(Object.keys(first).sort(), ['displays', 'id', 'ok']);
+    assert.ok(Array.isArray(first.displays), 'displays 是数组');
+    assert.ok(first.displays.length >= 1, '至少有一台活动显示器');
+    for (const d of first.displays) checkDisplay(d);
+    assert.equal(new Set(first.displays.map(d => d.id)).size, first.displays.length, 'id 不重复');
+    // 同一进程连续 20 次（流水线）：每次形状都对、显示器列表不变
+    for (let i = 0; i < 20; i++) h.send({ cmd: 'display', id: i });
+    for (let i = 0; i < 20; i++) {
+      const r = await h.next();
+      assert.equal(r.id, i, 'order');
+      assert.equal(r.ok, true, JSON.stringify(r.error));
+      for (const d of r.displays) checkDisplay(d);
+      assert.deepEqual(r.displays.map(d => d.id), first.displays.map(d => d.id));
+    }
+  } finally {
+    assert.equal(await h.close(), 0);
+  }
+  assert.ok(!/nvcpl\.dll/i.test(h.stderr), 'display 不应加载 nvcpl.dll：' + h.stderr);
+  console.log('        displays: ' + JSON.stringify(first.displays));
+});
+
+test('hdrLease：坏参数 → range、什么都不写；没有租约时 on:false 是成功的空操作', async () => {
+  const before = (await once({ cmd: 'get' })).state;
+  const t0 = Date.now() - 1000; // 日志时间只到毫秒且可能略有偏差，往前留 1 秒
+  const h = new HostProc();
+  const bad = [
+    ['on', {}], ['on', { on: null }], ['on', { on: 1 }], ['on', { on: 0 }], ['on', { on: 'true' }], ['on', { on: [] }], ['on', { on: {} }],
+    ['restore', { on: false, restore: 'no' }], ['restore', { on: false, restore: 0 }],
+    ['restore', { on: true, restore: 1 }], ['restore', { on: true, restore: [] }],
+  ];
+  try {
+    for (const [field, args] of bad) {
+      const id = 'bad ' + JSON.stringify(args);
+      const r = await h.call({ cmd: 'hdrLease', id, ...args });
+      assert.equal(r.ok, false, id);
+      assert.equal(r.error.code, 'range', id + ' ' + JSON.stringify(r.error));
+      assert.equal(r.error.field, field, id);
+      assert.equal(r.id, id);
+    }
+    // 没有租约：on:false（不论 restore）都成功、什么都不写，并带上当前状态
+    for (const args of [{}, { restore: true }, { restore: false }, { restore: null }]) {
+      const r = await h.call({ cmd: 'hdrLease', on: false, id: 'rel', ...args });
+      assert.equal(r.ok, true, JSON.stringify(r.error));
+      assert.deepEqual(Object.keys(r).sort(), ['changed', 'id', 'lease', 'ok', 'state']);
+      assert.equal(r.lease, false);
+      assert.equal(r.changed, false);
+      checkState(r.state);
+    }
+    assert.equal((await h.call({ cmd: 'get' })).ok, true, '之后仍可用');
+  } finally {
+    assert.equal(await h.close(), 0); // 没拿过租约：stdin EOF 时也没有东西要恢复
+  }
+  assert.ok(!/lease (acquired|released)/.test(h.stderr), '不应拿到或归还过租约：' + h.stderr);
+  const after = (await once({ cmd: 'get' })).state; // 新进程重新读
+  assert.deepEqual(stable(after), stable(before), '状态没变');
+  const sets = uxdSetsSince(t0);
+  if (sets !== null) assert.equal(sets, 0, 'NVIDIA 日志里出现了新的 NvCplApiSetSetting');
+  console.log(`        ${bad.length} 个坏请求全部被拒；4 次无租约 on:false 均为空操作；` +
+    (sets === null ? '（无 NVIDIA 调试日志，仅比对状态）' : `NVIDIA 日志里本测试期间的 SetSetting 调用：${sets} 次`));
 });
 
 test('坏请求：非法 JSON / 非对象 / 非法 UTF-8 → bad-request，进程继续工作', async () => {
@@ -352,26 +478,8 @@ if (LIVE) {
         console.log('        （没找到 _VAL_TrueHDR_M 注册表值，跳过注册表核对）');
       }
     } finally {
-      await once({ cmd: 'set', hdr: { middleGrey: mg0 }, commit: true });
-      let after = (await once({ cmd: 'get' })).state;
-      if (!isDeepStrictEqual(stable(after), stable(before))) {
-        // 兜底：按测试前读到的完整状态写回 0x318 / 0x317 / 0x32F / 0x330。
-        // indicator 会把 0x1 和 0x100 一起置位或清零：测试前只开了其中一位时用它写回会改动测试没碰过的那一位，
-        // 这种情况不写 0x330，留给下面的「恢复失败」报告和备份文件，人工处理
-        const bits = before.flags === null ? null : before.flags & 0x101;
-        const full = { cmd: 'set', commit: true,
-          hdr: { enabled: before.hdr.enabled, peak: before.hdr.peak, middleGrey: mg0, contrast: before.hdr.contrast, saturation: before.hdr.saturation },
-          vsr: { mode: before.vsr.mode, priority: before.vsr.priority === null ? undefined : before.vsr.priority },
-          indicator: bits === 0 || bits === 0x101 ? before.indicator : undefined };
-        await once(full);
-        after = (await once({ cmd: 'get' })).state;
-      }
-      restored = isDeepStrictEqual(stable(after), stable(before));
-      if (!restored) {
-        const backup = path.join(os.tmpdir(), 'rtx_hdr_host_live_backup.json');
-        fs.writeFileSync(backup, JSON.stringify(before, null, 2));
-        console.log('        !!! 恢复失败。测试前的状态：' + JSON.stringify(before) + '（已存到 ' + backup + '）');
-      }
+      try { await once({ cmd: 'set', hdr: { middleGrey: mg0 }, commit: true }); } catch (e) { console.log('        写回中间灰出错：' + (e && e.message)); }
+      restored = await restoreBaseline(before); // 还不一致就按测试前的完整状态兜底写回
     }
     assert.ok(restored, '已恢复');
     const after = (await once({ cmd: 'get' })).state;
@@ -382,6 +490,130 @@ if (LIVE) {
     if (sets !== null) assert.ok(sets >= 2, 'NVIDIA 日志应记录到 2 次 SetSetting，实际 ' + sets);
     console.log('        已恢复：middleGrey ' + mg0 + ' → ' + mg1 + ' → ' + after.hdr.middleGrey +
       (sets === null ? '' : '；NVIDIA 日志记录到 SetSetting ' + sets + ' 次'));
+  });
+
+  test('live：hdrLease 只关 HDR、超分不变 → 关 stdin 自动恢复；on:false 恢复；restore:false 不恢复 → 恢复并核对', async () => {
+    const before = (await once({ cmd: 'get' })).state; // 完整基线：0x318 / 0x315 / 0x32F / 0x330
+    checkState(before);
+    if (!before.hdr.supported || before.hdr.error !== 0) {
+      console.log('        跳过：RTX Video HDR 当前不可用（supported=' + before.hdr.supported + ', error=' + before.hdr.error + '）');
+      return;
+    }
+    const tLive = Date.now() - 1000;
+    const procs = [];
+    const open = () => { const h = new HostProc(); procs.push(h); return h; };
+    const read = async () => { const r = await once({ cmd: 'get' }); assert.equal(r.ok, true, JSON.stringify(r.error)); return r.state; };
+    // 除 HDR 开关以外都与测试前一致
+    const onlyEnabledDiffers = (s, what) => assert.deepEqual(stable({ ...s, hdr: { ...s.hdr, enabled: before.hdr.enabled } }), stable(before), what);
+    let restored = false;
+    let writes = 0; // 预期本测试写 0x318 的次数
+    try {
+      if (!before.hdr.enabled) {
+        // 测试前 HDR 就是关的：拿租约、归还都不写
+        const L = open();
+        const a = await L.call({ cmd: 'hdrLease', on: true });
+        assert.equal(a.ok, true, JSON.stringify(a.error));
+        assert.equal(a.prevEnabled, false);
+        assert.equal(a.changed, false);
+        assert.equal(await L.close(), 0);
+        assert.deepEqual(stable(await read()), stable(before));
+        console.log('        测试前 RTX Video HDR 是关的：租约没有写入（开关测试需要 HDR 开着）');
+        return;
+      }
+
+      // ① 拿租约 → 另一个进程读到 enabled=0、超分不变 → 关 stdin（相当于浏览器关闭端口）→ 退出前自动恢复
+      const L = open();
+      const a = await L.call({ cmd: 'hdrLease', on: true, id: 'a' });
+      assert.equal(a.ok, true, JSON.stringify(a.error));
+      writes++;
+      assert.deepEqual(Object.keys(a).sort(), ['changed', 'id', 'lease', 'ok', 'prevEnabled', 'state']);
+      assert.equal(a.id, 'a');
+      assert.equal(a.lease, true);
+      assert.equal(a.prevEnabled, true);
+      assert.equal(a.changed, true);
+      checkState(a.state);
+      assert.equal(a.state.hdr.enabled, false, '回复：HDR 开关已是 0');
+      onlyEnabledDiffers(a.state, '回复：只动了 HDR 开关');
+      const seen = await read();
+      assert.equal(seen.hdr.enabled, false, '另一个进程读到 enabled=0');
+      assert.equal(seen.vsr.mode, before.vsr.mode, '超分模式不变');
+      onlyEnabledDiffers(seen, '另一个进程：其它设置都没变');
+      const a2 = await L.call({ cmd: 'hdrLease', on: true, id: 'a2' });
+      assert.equal(a2.ok, true, JSON.stringify(a2.error));
+      assert.equal(a2.prevEnabled, true, '租约期间再次 on:true 不覆盖 prevEnabled');
+      assert.equal(a2.changed, false, '已经是 0，不重复写');
+      const tEof = Date.now();
+      assert.equal(await L.close(), 0, 'stdin EOF → 退出码 0');
+      writes++;
+      assert.match(L.stderr, /lease released \(stdin closed\): HDR re-enabled/, 'stderr：' + L.stderr);
+      const back = await read();
+      const eofMs = Date.now() - tEof;
+      assert.equal(back.hdr.enabled, true, 'EOF 后另一个进程读到 HDR 已恢复');
+      assert.deepEqual(stable(back), stable(before), 'EOF 后与测试前一致');
+      console.log(`        ① 租约中另一进程读到 enabled=${seen.hdr.enabled}、vsr.mode=${seen.vsr.mode}（测试前 ${before.vsr.mode}）、` +
+        `hdr.active=${seen.hdr.active}、vsr.level=${seen.vsr.level}（测试前 ${before.hdr.active} / ${before.vsr.level}）；` +
+        `关 stdin → ${eofMs} ms 内新进程读到 enabled=${back.hdr.enabled}`);
+
+      // ② on:true → on:false：立即恢复；再还一次是空操作；之后关 stdin 不再写
+      const M = open();
+      const b = await M.call({ cmd: 'hdrLease', on: true });
+      assert.equal(b.ok, true, JSON.stringify(b.error));
+      writes++;
+      assert.equal(b.changed, true);
+      assert.equal(b.state.hdr.enabled, false);
+      const c = await M.call({ cmd: 'hdrLease', on: false, id: 'c' });
+      assert.equal(c.ok, true, JSON.stringify(c.error));
+      writes++;
+      assert.deepEqual(Object.keys(c).sort(), ['changed', 'id', 'lease', 'ok', 'state']);
+      assert.equal(c.lease, false);
+      assert.equal(c.changed, true);
+      assert.equal(c.state.hdr.enabled, true, 'on:false 回复：HDR 已恢复');
+      assert.deepEqual(stable(c.state), stable(before), 'on:false 后与测试前一致');
+      const c2 = await M.call({ cmd: 'hdrLease', on: false });
+      assert.equal(c2.ok, true, JSON.stringify(c2.error));
+      assert.equal(c2.changed, false, '再还一次：空操作');
+      const tReleased = Date.now() + 1;
+      assert.equal(await M.close(), 0);
+      assert.equal((await read()).hdr.enabled, true, '另一个进程读到已恢复');
+      const extra = uxdSetsSince(tReleased);
+      if (extra !== null) assert.equal(extra, 0, '归还之后关 stdin 不应再写');
+      console.log('        ② on:false 立即恢复 enabled=' + c.state.hdr.enabled + '；之后关 stdin ' +
+        (extra === null ? '（无 NVIDIA 调试日志，未核对写入次数）' : `没有再写（SetSetting ${extra} 次）`));
+
+      // ③ restore:false：只放弃租约、不碰开关，进程退出时也不恢复 → 由测试自己恢复
+      const N = open();
+      const d = await N.call({ cmd: 'hdrLease', on: true });
+      assert.equal(d.ok, true, JSON.stringify(d.error));
+      writes++;
+      assert.equal(d.state.hdr.enabled, false);
+      const e = await N.call({ cmd: 'hdrLease', on: false, restore: false, id: 'e' });
+      assert.equal(e.ok, true, JSON.stringify(e.error));
+      assert.equal(e.lease, false);
+      assert.equal(e.changed, false, 'restore:false 不写');
+      assert.equal(e.state.hdr.enabled, false, 'restore:false：开关保持 0');
+      assert.equal(await N.close(), 0);
+      assert.match(N.stderr, /lease released \(on:false, restore:false\): enabled bit not written/, 'stderr：' + N.stderr);
+      const off = await read();
+      assert.equal(off.hdr.enabled, false, 'restore:false：进程退出后仍是 0（租约已放弃，不再恢复）');
+      onlyEnabledDiffers(off, 'restore:false：其它设置都没变');
+      const f = await once({ cmd: 'set', hdr: { enabled: true }, commit: true });
+      assert.equal(f.ok, true, JSON.stringify(f.error));
+      writes++;
+      assert.equal(f.state.hdr.enabled, true, '测试自己把 HDR 开回去');
+      console.log('        ③ restore:false 后进程退出，新进程读到 enabled=' + off.hdr.enabled + ' → 测试用 set 恢复为 ' + f.state.hdr.enabled);
+    } finally {
+      for (const h of procs) {
+        try { await h.close(); } catch (e) { console.log('        关闭 host 进程出错：' + (e && e.message)); }
+      }
+      restored = await restoreBaseline(before); // 还不一致就按测试前的完整状态兜底写回
+    }
+    assert.ok(restored, '已恢复');
+    const after = await read();
+    assert.deepEqual(stable(after), stable(before), '恢复后与测试前完全一致');
+    const sets = uxdSetsSince(tLive);
+    if (sets !== null) assert.ok(sets >= writes, `NVIDIA 日志应至少记录到 ${writes} 次 SetSetting，实际 ${sets}`);
+    console.log('        已恢复并核对：' + JSON.stringify(stable(after)) +
+      (sets === null ? '' : `；NVIDIA 日志记录到 SetSetting ${sets} 次（预期 ${writes}）`));
   });
 }
 

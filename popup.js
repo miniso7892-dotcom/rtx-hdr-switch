@@ -3,17 +3,16 @@
   'use strict';
 
   const L = globalThis.RtxHdrLib;
+  const I = globalThis.RtxHdrI18n;
   const $ = (id) => document.getElementById(id);
   const REFRESH_MS = 1000;
   const IS_EDGE = /\bEdg\//.test(navigator.userAgent);
-  const COMMAND_NAMES = {
-    'toggle-hdr': '切换当前视频的 RTX HDR',
-    'toggle-auto': '开/关 自动检测白底视频',
-    'forget-video': '清除当前视频的记忆',
-    'nv-next-preset': '切换到下一个 NVIDIA 预设',
-    _execute_action: '打开此弹窗'
-  };
+  const TAB_KEY = 'popupTab';
+  const TABS = ['video', 'nv', 'rules'];
+  const HDR_ONLY_KEY = 'hdrOnlyStatus'; // background 写：{active, leased, error?}
+  const SDR_LAST_KEY = 'nvLastSdrWhite'; // 跟随 SDR 亮度：上次按它调过中间灰的白电平
   const NV_POLL_MS = 2000;
+  const SDR_POLL_MS = 2000;
   const NV_THROTTLE_MS = 200; // 和 NVIDIA App 拖动滑块时一样
   // 下拉框：键盘在收起的下拉框上按方向键时每一步都触发 change，停这么久没再变才写入 / 保存
   const NV_DEBOUNCE_MS = 500;
@@ -23,9 +22,15 @@
   const NV_HOTKEY_ERROR_KEY = 'nvHotkeyError'; // 快捷键切换预设失败、页面上显示不了时 background 留下的提示
   const NV_HOTKEY_ERROR_MAX_AGE = 10 * 60 * 1000;
   const NV_SLIDERS = ['peak', 'middleGrey', 'contrast', 'saturation'];
-  const NV_LEVEL_TEXT = ['', '非常低', '低', '中', '高'];
   // 这些错误说明本地组件或 NVIDIA App 用不了，不再轮询
   const NV_FATAL = new Set(['host-missing', 'host-forbidden', 'no-dll', 'init', 'protocol']);
+  // 文字由脚本随状态改写的元素：切换语言时不按 data-i18n 覆盖
+  const DYNAMIC_TEXT = new Set(['video-message', 'nv-message', 'sdr-read', 'nv-delete']);
+
+  let uiLanguage = '';
+  try { uiLanguage = chrome.i18n.getUILanguage(); } catch (e) { uiLanguage = navigator.language || ''; }
+  let lang = 'zh';
+  const t = (key, params) => I.t(lang, key, params);
 
   let tabId = null;
   let tabHost = '';
@@ -36,10 +41,13 @@
   let settings = L.mergeSettings(null);
   let busy = false;
   let epoch = 0; // 每次用户操作 +1，丢弃操作前发出的刷新结果
+  let commands = [];
+  let hdrOnlyStatus = null;
 
   let nvMode = 'connecting'; // connecting | missing | error | ready
   let nvError = null;
   let nvState = null; // 最近读到的 State，叠加了还没确认的乐观修改
+  let nvCaps = { display: false, hdrLease: false };
   let nvLink = null; // {port, waiters}：弹窗开着时常驻的本地组件进程
   let nvSeq = 0;
   let nvPortFails = 0;
@@ -60,6 +68,13 @@
   let nvDeleteArmed = null; // {id, timer}：「删除」按了第一次，等再按一次确认
   let nvOverwriteName = null; // 已提示过「将覆盖」的同名预设，再保存一次才覆盖
   let saveTimer = 0;
+  let accentTimer = 0;
+
+  let sdrDisplays = null; // 本地组件 display 命令读到的显示器（规范化过）
+  let sdrBusy = false;
+  let sdrPollTimer = 0;
+  let sdrLastWhite = null;
+  let sdrMsgTimer = 0;
 
   function noop() {}
 
@@ -82,6 +97,137 @@
     return !!st && typeof st === 'object' && st.ok === true;
   }
 
+  // 每秒刷新一次：只在内容真的变了时才写 DOM，免得读屏软件反复朗读
+  function setText(id, text) {
+    const el = $(id);
+    if (el.textContent !== text) el.textContent = text;
+    return el;
+  }
+
+  function setClass(id, cls) {
+    const el = $(id);
+    if (el.className !== cls) el.className = cls;
+  }
+
+  function radios(name) {
+    return document.querySelectorAll('input[name="' + name + '"]');
+  }
+
+  // ---------- 语言与主题 ----------
+
+  function applyI18n() {
+    lang = I.resolve(settings.ui.lang, uiLanguage);
+    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+    for (const el of document.querySelectorAll('[data-i18n]')) {
+      if (DYNAMIC_TEXT.has(el.id)) continue;
+      const s = t(el.dataset.i18n);
+      if (el.textContent !== s) el.textContent = s;
+    }
+    for (const el of document.querySelectorAll('[data-i18n-attr]')) {
+      for (const pair of el.dataset.i18nAttr.split(';')) {
+        const i = pair.indexOf(':');
+        if (i > 0) el.setAttribute(pair.slice(0, i).trim(), t(pair.slice(i + 1).trim()));
+      }
+    }
+    for (const r of radios('lang')) r.checked = r.value === settings.ui.lang;
+  }
+
+  function applyTheme(hex) {
+    const ink = L.accentInk(hex || settings.ui.accent);
+    const st = document.documentElement.style;
+    st.setProperty('--accent', ink.accent);
+    st.setProperty('--on-accent', ink.on);
+    st.setProperty('--accent-fg', ink.fg);
+  }
+
+  function checkSvg(color) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 18 18');
+    svg.setAttribute('aria-hidden', 'true');
+    const p = document.createElementNS(NS, 'path');
+    p.setAttribute('d', 'M3.5 9.5 L7.5 13 L14.5 5');
+    p.setAttribute('fill', 'none');
+    p.setAttribute('stroke', color);
+    p.setAttribute('stroke-width', '3');
+    p.setAttribute('stroke-linecap', 'square');
+    svg.appendChild(p);
+    return svg;
+  }
+
+  function renderTheme() {
+    applyTheme();
+    const wrap = $('theme-swatches');
+    if (!wrap.childElementCount) {
+      for (const a of L.ACCENTS) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'swatch';
+        b.dataset.hex = a.hex;
+        b.dataset.name = a.id;
+        b.style.setProperty('--c', a.hex);
+        const svg = checkSvg(L.accentInk(a.hex).on);
+        b.appendChild(svg);
+        b.addEventListener('click', () => {
+          clearTimeout(accentTimer);
+          save((s) => { s.ui.accent = a.hex; });
+        });
+        wrap.appendChild(b);
+      }
+    }
+    const accent = settings.ui.accent;
+    let name = t('theme.customName');
+    for (const b of wrap.children) {
+      const on = b.dataset.hex === accent;
+      if (on) name = t('theme.' + b.dataset.name);
+      b.setAttribute('aria-pressed', String(on));
+      b.setAttribute('aria-label', t('theme.' + b.dataset.name));
+      b.firstChild.style.visibility = on ? 'visible' : 'hidden';
+    }
+    setText('theme-name', name);
+    setText('theme-hex', accent);
+    const input = $('theme-custom');
+    if (document.activeElement !== input && input.value.toUpperCase() !== accent) input.value = accent.toLowerCase();
+  }
+
+  // ---------- 页签 ----------
+
+  function selectTab(name, focus) {
+    const tab = TABS.indexOf(name) >= 0 ? name : 'video';
+    for (const b of document.querySelectorAll('[role="tab"]')) {
+      const on = b.dataset.tab === tab;
+      b.setAttribute('aria-selected', String(on));
+      b.tabIndex = on ? 0 : -1;
+      $('panel-' + b.dataset.tab).hidden = !on;
+      if (on && focus) b.focus();
+    }
+    return tab;
+  }
+
+  function bindTabs() {
+    const list = Array.from(document.querySelectorAll('[role="tab"]'));
+    for (const b of list) {
+      b.addEventListener('click', () => {
+        const tab = selectTab(b.dataset.tab, false);
+        call(() => chrome.storage.local.set({ [TAB_KEY]: tab })).catch(noop);
+      });
+      b.addEventListener('keydown', (e) => {
+        const i = list.indexOf(b);
+        let j = -1;
+        if (e.key === 'ArrowRight') j = (i + 1) % list.length;
+        else if (e.key === 'ArrowLeft') j = (i - 1 + list.length) % list.length;
+        else if (e.key === 'Home') j = 0;
+        else if (e.key === 'End') j = list.length - 1;
+        if (j < 0) return;
+        e.preventDefault();
+        const tab = selectTab(list[j].dataset.tab, true);
+        call(() => chrome.storage.local.set({ [TAB_KEY]: tab })).catch(noop);
+      });
+    }
+  }
+
+  // ---------- 当前视频 ----------
+
   async function askFrame(fid, msg) {
     try {
       return await chrome.tabs.sendMessage(tabId, msg, { frameId: fid });
@@ -98,8 +244,6 @@
       return 0;
     }
   }
-
-  // ---------- 当前视频 ----------
 
   async function refresh() {
     if (busy || !usable) return;
@@ -121,79 +265,84 @@
     }
   }
 
-  // 每秒刷新一次：只在内容真的变了时才写 DOM，免得读屏软件反复朗读
-  function setText(id, text) {
-    const el = $(id);
-    if (el.textContent !== text) el.textContent = text;
-    return el;
-  }
-
-  function setClass(id, cls) {
-    const el = $(id);
-    if (el.className !== cls) el.className = cls;
-  }
-
   function showMessage(text, warn) {
     $('video-panel').hidden = true;
+    $('video-actions').hidden = true;
+    $('video-note').hidden = true;
+    $('video-luma').hidden = true;
     const m = setText('video-message', text);
     m.hidden = false;
     m.classList.toggle('warn', !!warn);
   }
 
+  function shortcutOf(name) {
+    const c = commands.find((x) => x && x.name === name);
+    return (c && c.shortcut) || '';
+  }
+
   function renderState(st) {
     current = st;
-    if (!usable) return showMessage('此页面无法使用', false);
-    if (!st) {
-      return showMessage(isFile
-        ? '无法连接到此页面。本地文件需要在扩展详情页开启「允许访问文件网址」，然后刷新页面。'
-        : '还没有连接到此页面，请刷新页面后重试。', false);
-    }
+    renderGlobalOff();
+    if (!usable) return showMessage(t('video.unusable'), false);
+    if (!st) return showMessage(isFile ? t('video.fileAccess') : t('video.notConnected'), false);
     if (!st.hasVideo) {
-      return showMessage(st.offscreen ? '视频不在可见区域内'
-        : st.videoCount > 0 ? '此页面没有检测到正在显示的视频' : '此页面没有检测到视频', false);
+      return showMessage(st.offscreen ? t('video.offscreen') : st.videoCount > 0 ? t('video.notShowing') : t('video.none'), false);
     }
-    if (st.drm) return showMessage('受版权保护的视频，无法控制', true);
+    if (st.drm) return showMessage(t('video.drm'), true);
 
     $('video-message').hidden = true;
     $('video-panel').hidden = false;
+    $('video-actions').hidden = false;
 
     const pending = st.state !== 'on' && st.state !== 'off';
     const on = st.state === 'on';
-    setText('state-big', pending ? '读取中…' : on ? 'HDR 开' : 'HDR 关');
-    setClass('state-big', 'big ' + (pending ? '' : on ? 'on' : 'off'));
-    setClass('state-dot', 'dot' + (on ? ' on' : ''));
-    const reason = [];
-    if (st.reasonText) reason.push('原因：' + st.reasonText);
-    const nvNote = on ? nvGlobalHdrNote() : '';
-    if (nvNote) reason.push(nvNote);
-    setText('state-reason', reason.join('；'));
+    setClass('video-panel', 'state' + (pending ? ' is-pending' : on ? '' : ' is-off'));
+    setText('video-host', st.hostname || tabHost || '');
+    setText('state-big', pending ? t('video.loading') : on ? 'HDR' : 'SDR');
+    setText('state-word', pending ? '' : t(on ? 'video.on' : 'video.off'));
+    const key = shortcutOf('toggle-hdr');
+    setText('state-key', key).hidden = !key || pending;
+    const reason = L.reasonText(st.reason, lang);
+    setText('state-reason', reason ? t('video.reason', { reason: reason }) : '');
+    const hdrOnly = !!(hdrOnlyStatus && hdrOnlyStatus.active);
+    setText('state-extra', pending || on ? '' : t(hdrOnly ? 'video.vsrKept' : 'video.vsrOffToo'));
 
-    const note = st.pip ? '画中画窗口里可能无法关闭 HDR（浏览器限制），回到页面内播放后生效。' : '';
+    const note = st.pip ? t('video.pip') : '';
     setText('video-note', note).hidden = !note;
 
-    const key = setText('video-key', st.key || '');
-    if (key.title !== (st.key || '')) key.title = st.key || '';
-
-    let luma = L.formatLuma(st.mean, st.white);
+    let luma = L.formatLuma(st.mean, st.white, lang);
     if (!luma && st.auto && st.auto.mode !== 'off') {
-      if (st.autoUnknown === 'tainted') luma = '自动检测：跨域视频，无法读取画面亮度';
-      else if (st.autoUnknown === 'error') luma = '自动检测：无法读取画面亮度';
+      if (st.autoUnknown === 'tainted') luma = t('video.autoTainted');
+      else if (st.autoUnknown === 'error') luma = t('video.autoError');
     }
-    setText('video-luma', luma);
+    setText('video-luma', luma).hidden = !luma;
 
-    $('btn-toggle').disabled = pending;
+    const btn = $('btn-toggle');
+    btn.disabled = pending;
+    setText('btn-toggle', on ? t('video.toSdr') : t('video.toHdr'));
+    btn.classList.toggle('to-hdr', !pending && !on);
     const forget = $('btn-forget');
     forget.disabled = !(st.manual || st.saved);
-    forget.title = forget.disabled ? '此视频没有手动切换或记忆' : '';
+    forget.title = forget.disabled ? t('video.forgetDisabled') : '';
   }
 
-  // 「HDR 开」只表示扩展没有阻止；NVIDIA 全局 HDR 关着或不可用时在原因行说明，免得和下面的 NVIDIA 面板矛盾
-  function nvGlobalHdrNote() {
-    if (nvMode !== 'ready' || !nvState) return '';
-    const h = nvState.hdr;
-    if (!h.supported) return L.nvErrorText({ code: 'unsupported', field: 'hdr' });
-    if (h.error) return 'NVIDIA 全局 HDR 不可用：' + L.nvHdrErrorText(h.error);
-    return h.enabled ? '' : 'NVIDIA 全局 HDR 已关闭';
+  // NVIDIA 全局 HDR 关着或不可用时，在视频页签顶部说明（逐视频的开关这时不起作用）；
+  // 「只关 HDR」模式正在借用全局开关时不算
+  function renderGlobalOff() {
+    let text = '';
+    let canTurnOn = false;
+    if (nvMode === 'ready' && nvState) {
+      const h = nvState.hdr;
+      if (!h.supported) text = L.nvErrorText({ code: 'unsupported', field: 'hdr' }, lang);
+      else if (h.error) text = L.nvHdrErrorText(h.error, lang);
+      else if (!h.enabled && !(hdrOnlyStatus && hdrOnlyStatus.leased)) {
+        text = t('video.globalOff');
+        canTurnOn = true;
+      }
+    }
+    setText('global-off-text', text);
+    $('global-off').hidden = !text;
+    $('global-off-on').hidden = !canTurnOn;
   }
 
   async function sendAction(state) {
@@ -218,20 +367,53 @@
 
   function renderSettings() {
     const s = settings;
+    applyI18n();
     setValue('site-rule', (tabHost && s.sites[tabHost]) || '');
     setValue('auto-mode', s.autoDetect);
-    setValue('sensitivity', s.sensitivity);
-    $('sensitivity').disabled = s.autoDetect === 'off';
+    for (const r of radios('sensitivity')) {
+      r.checked = r.value === s.sensitivity;
+      r.disabled = s.autoDetect === 'off';
+    }
     setChecked('night-enabled', s.night.enabled);
+    setText('night-range', s.night.start + ' – ' + s.night.end);
     setValue('night-start', s.night.start);
     setValue('night-end', s.night.end);
     setValue('eye-minutes', String(s.eye.minutes));
+    setText('eye-sub', s.eye.minutes === 0 ? t('video.eyeOffNote') : t(s.eye.autoOff ? 'video.eyeAutoOff' : 'video.eyeRemind'));
     setChecked('eye-autooff', s.eye.autoOff);
     $('eye-autooff').disabled = s.eye.minutes === 0;
-    for (const r of document.querySelectorAll('input[name="default-state"]')) r.checked = r.value === s.defaultState;
+    for (const r of radios('default-state')) r.checked = r.value === s.defaultState;
     setChecked('remember-manual', s.rememberManual);
     setChecked('show-osd', s.osd);
+    setChecked('player-button', s.playerButton);
+    setChecked('hdr-only', s.hdrOnly);
+    setChecked('sdr-follow', s.nv.followSdr);
+    renderHdrOnlyStatus();
+    renderTheme();
     renderNvPresets();
+    renderFoot();
+    renderShortcuts();
+    if (current) renderState(current);
+    if (nvState) nvRender();
+    renderSdr();
+  }
+
+  function renderFoot() {
+    const key = shortcutOf('toggle-auto');
+    setText('foot-auto-key', key ? t('foot.autoKey', { key: key }) : '');
+    let v = '';
+    try { v = 'v' + chrome.runtime.getManifest().version; } catch (e) { v = ''; }
+    setText('foot-version', v);
+  }
+
+  function renderHdrOnlyStatus() {
+    let text = '';
+    if (settings.hdrOnly) {
+      if (nvMode === 'missing') text = t('rules.hdrOnlyNeedsHost');
+      else if (nvMode === 'ready' && !nvCaps.hdrLease) text = t('rules.hdrOnlyOldHost');
+      else if (hdrOnlyStatus && hdrOnlyStatus.error) text = t('rules.hdrOnlyFailed', { err: L.nvErrorText(hdrOnlyStatus.error, lang) });
+    }
+    setText('hdr-only-status', text).hidden = !text;
   }
 
   // delay：过一会儿再写 storage（期间再改会重新计时），界面和 settings 立即更新
@@ -256,7 +438,21 @@
     $(id).addEventListener('change', (e) => fn(e.target));
   }
 
+  function openOptions(hash) {
+    const url = chrome.runtime.getURL('options.html' + (hash || ''));
+    call(() => chrome.tabs.create({ url: url })).catch(noop);
+  }
+
+  // 「只关 HDR」模式正借着全局开关：用户亲手改全局 HDR 时先让 background 放手（不再恢复）
+  function dropHdrOnlyLease() {
+    if (!(hdrOnlyStatus && hdrOnlyStatus.leased)) return;
+    call(() => chrome.runtime.sendMessage({ type: 'hdr-only', op: 'drop' })).catch(noop);
+  }
+
   function bind() {
+    for (const r of radios('lang')) {
+      r.addEventListener('change', () => { if (r.checked) save((s) => { s.ui.lang = r.value; }); });
+    }
     onChange('site-rule', (el) => save((s) => {
       if (!tabHost) return;
       if (el.value === 'on' || el.value === 'off') s.sites[tabHost] = el.value;
@@ -266,7 +462,9 @@
       s.autoDetect = el.value;
       if (el.value !== 'off') s.autoLastMode = el.value;
     }));
-    onChange('sensitivity', (el) => save((s) => { s.sensitivity = el.value; }));
+    for (const r of radios('sensitivity')) {
+      r.addEventListener('change', () => { if (r.checked) save((s) => { s.sensitivity = r.value; }); });
+    }
     onChange('night-enabled', (el) => save((s) => { s.night.enabled = el.checked; }));
     for (const which of ['start', 'end']) {
       onChange('night-' + which, (el) => {
@@ -282,14 +480,27 @@
       el.value = String(settings.eye.minutes); // 写回规范化后的值（输入框仍有焦点时 renderSettings 不会改它）
     });
     onChange('eye-autooff', (el) => save((s) => { s.eye.autoOff = el.checked; }));
-    for (const r of document.querySelectorAll('input[name="default-state"]')) {
+    for (const r of radios('default-state')) {
       r.addEventListener('change', () => { if (r.checked) save((s) => { s.defaultState = r.value; }); });
     }
     onChange('remember-manual', (el) => save((s) => { s.rememberManual = el.checked; }));
     onChange('show-osd', (el) => save((s) => { s.osd = el.checked; }));
+    onChange('player-button', (el) => save((s) => { s.playerButton = el.checked; }));
+    onChange('hdr-only', (el) => save((s) => { s.hdrOnly = el.checked; }));
     // 停一会儿再保存：background 会马上套用当前时段的预设，键盘浏览途经的预设不应写到显卡上
     onChange('nv-night-preset', (el) => save((s) => { s.nv.nightPresetId = el.value || null; }, NV_DEBOUNCE_MS));
     onChange('nv-day-preset', (el) => save((s) => { s.nv.dayPresetId = el.value || null; }, NV_DEBOUNCE_MS));
+
+    // 自定义主题色：拖动取色器时只预览，停一会儿再保存
+    $('theme-custom').addEventListener('input', (e) => {
+      applyTheme(e.target.value);
+      clearTimeout(accentTimer);
+      accentTimer = setTimeout(() => save((s) => { s.ui.accent = e.target.value; }), 400);
+    });
+    onChange('theme-custom', (el) => {
+      clearTimeout(accentTimer);
+      save((s) => { s.ui.accent = el.value; });
+    });
 
     $('btn-toggle').addEventListener('click', () => {
       if (current && current.hasVideo) sendAction(current.state === 'off' ? 'on' : 'off');
@@ -299,14 +510,25 @@
       const url = IS_EDGE ? 'edge://extensions/shortcuts' : 'chrome://extensions/shortcuts';
       call(() => chrome.tabs.create({ url: url })).catch(noop);
     });
+    $('btn-export').addEventListener('click', () => openOptions('#export'));
+    $('btn-import').addEventListener('click', () => openOptions('#import'));
+    $('global-off-on').addEventListener('click', () => nvWrite({ hdr: { enabled: true } }, true));
 
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== 'local') return;
         if (changes[NV_LAST_PRESET_KEY]) nvLastPresetId = changes[NV_LAST_PRESET_KEY].newValue || null;
+        if (changes[SDR_LAST_KEY]) sdrLastWhite = changes[SDR_LAST_KEY].newValue == null ? null : changes[SDR_LAST_KEY].newValue;
+        if (changes[HDR_ONLY_KEY]) {
+          hdrOnlyStatus = changes[HDR_ONLY_KEY].newValue || null;
+          renderHdrOnlyStatus();
+          renderGlobalOff();
+          if (current) renderState(current);
+        }
         if (changes.settings) {
           settings = L.mergeSettings(changes.settings.newValue);
           renderSettings();
+          sdrSyncPolling();
         }
       });
     } catch (e) { /* ignore */ }
@@ -321,7 +543,7 @@
     port.onMessage.addListener((res) => {
       if (!res || typeof res !== 'object') return;
       // 按 id 对应；本地组件没回 id 时按顺序。已超时的请求的迟到回复直接丢掉
-      let i = res.id == null ? 0 : link.waiters.findIndex((w) => w.id === res.id);
+      const i = res.id == null ? 0 : link.waiters.findIndex((w) => w.id === res.id);
       if (i < 0 || !link.waiters.length) return;
       link.waiters.splice(i, 1)[0].done(res);
     });
@@ -403,7 +625,7 @@
     } else if (NV_FATAL.has(err.code) || !nvState) {
       nvMode = 'error';
     } else {
-      nvMessage(L.nvErrorText(err), true);
+      nvMessage(L.nvErrorText(err, lang), true);
       return;
     }
     nvError = err;
@@ -430,10 +652,17 @@
     const hello = await nvRequest({ cmd: 'hello' });
     if (!hello || hello.ok !== true) nvFailed(hello);
     else if (hello.protocol !== L.NV_PROTOCOL) nvFailed({ error: { code: 'protocol' } });
+    else {
+      const caps = Array.isArray(hello.caps) ? hello.caps : [];
+      nvCaps = { display: caps.indexOf('display') >= 0, hdrLease: caps.indexOf('hdrLease') >= 0 };
+    }
     if (nvMode === 'missing' || (nvError && NV_FATAL.has(nvError.code))) return;
     await nvPoll();
     if (nvMode === 'missing' || (nvError && NV_FATAL.has(nvError.code))) return;
     nvPollTimer = setInterval(nvPoll, NV_POLL_MS);
+    // 已经开着「跟随 SDR 亮度」或之前读过：打开弹窗就读一次
+    if (nvCaps.display) sdrRead().then(sdrSyncPolling);
+    else renderSdr();
   }
 
   // ---------- NVIDIA 设置：写入 ----------
@@ -491,7 +720,7 @@
     nvQueued = null;
     nvQueuedDone = [];
     if (!v.ok) {
-      nvMessage(L.nvErrorText(v.error), true);
+      nvMessage(L.nvErrorText(v.error, lang), true);
       nvEpoch++;
       nvPoll(); // 读回真实状态，撤销乐观修改
       nvDone(done, v);
@@ -539,6 +768,19 @@
     if (el.getAttribute(name) !== s) el.setAttribute(name, s);
   }
 
+  // 滑块轨道上的填充：单向的从左端到滑块，正负对称的（对比度、饱和度）从中点到滑块
+  function sliderFill(el) {
+    const min = Number(el.min), max = Number(el.max), v = Number(el.value);
+    const pct = max > min ? Math.min(100, Math.max(0, (v - min) / (max - min) * 100)) : 0;
+    const bipolar = min < 0 && max > 0;
+    el.style.setProperty('--a', (bipolar ? Math.min(50, pct) : 0) + '%');
+    el.style.setProperty('--b', (bipolar ? Math.max(50, pct) : pct) + '%');
+  }
+
+  function signed(n) {
+    return n > 0 ? '+' + n : String(n);
+  }
+
   // items: [[value, text, disabled?]]；选项变了才重建，免得打断正在用的下拉框
   function fillSelect(el, items, value) {
     const sig = JSON.stringify(items);
@@ -560,27 +802,26 @@
     const ready = nvMode === 'ready' && !!nvState;
     $('nv-missing').hidden = nvMode !== 'missing';
     $('nv-panel').hidden = !ready;
-    // 没装本地组件时说明也写在这个 aria-live 区域里（安装链接在它下面），读屏软件会播报状态变化
+    if (nvMode === 'missing') setText('nv-missing-text', L.nvErrorText({ code: 'host-missing' }, lang));
     const m = $('nv-message');
-    m.hidden = ready;
+    m.hidden = ready || nvMode === 'missing';
     if (!m.hidden) {
-      setText('nv-message', nvMode === 'connecting' ? '正在连接本地组件…'
-        : L.nvErrorText(nvMode === 'missing' ? { code: 'host-missing' } : nvError));
-      m.classList.toggle('warn', nvMode === 'error' || nvMode === 'missing');
+      setText('nv-message', nvMode === 'connecting' ? t('nv.connecting') : L.nvErrorText(nvError, lang));
+      m.classList.toggle('warn', nvMode === 'error');
     }
     renderNvPresets();
-    if (current) renderState(current); // 视频卡片原因行里的「NVIDIA 全局 HDR 已关闭」
+    renderGlobalOff();
+    renderHdrOnlyStatus();
     if (!ready) return;
 
     const h = nvState.hdr;
     const hdrOk = h.supported && !h.error;
-    const reason = !h.supported ? L.nvErrorText({ code: 'unsupported', field: 'hdr' }) : L.nvHdrErrorText(h.error);
+    const reason = !h.supported ? L.nvErrorText({ code: 'unsupported', field: 'hdr' }, lang) : L.nvHdrErrorText(h.error, lang);
     setText('nv-hdr-reason', reason).hidden = !reason;
     const sw = $('nv-hdr');
     sw.checked = h.enabled;
     sw.disabled = !hdrOk;
-    setText('nv-hdr-state', '状态：' + (h.active ? '已激活' : '未激活'));
-    setClass('nv-hdr-dot', 'dot' + (h.active ? ' on' : ''));
+    setText('nv-hdr-state', !h.enabled ? t('nv.globalOff') : h.active ? t('nv.globalActive') : t('nv.globalInactive'));
 
     // 和 NVIDIA App 一样：最高亮度上限不超过 400 时不显示这个滑块
     $('nv-peak-wrap').hidden = !(h.peakMax > 400);
@@ -592,7 +833,8 @@
       const el = $('nv-' + f);
       el.disabled = !hdrOk;
       if (!(nvDrag && nvDrag.id === el.id)) setNum(el, h[f]);
-      if (f !== 'peak') setText('nv-' + f + '-out', String(h[f]));
+      sliderFill(el);
+      if (f !== 'peak') setText('nv-' + f + '-out', f === 'middleGrey' ? String(h[f]) : signed(h[f]));
     }
     const num = $('nv-peak-num');
     num.disabled = !hdrOk;
@@ -600,25 +842,25 @@
     $('nv-peak-hint').hidden = !(h.peak > 1000);
 
     const v = nvState.vsr;
-    setText('nv-vsr-reason', v.supported ? '' : L.nvErrorText({ code: 'unsupported', field: 'vsr' })).hidden = v.supported;
+    setText('nv-vsr-reason', v.supported ? '' : L.nvErrorText({ code: 'unsupported', field: 'vsr' }, lang)).hidden = v.supported;
     const sel = $('nv-vsr');
     sel.disabled = !v.supported;
     setNum(sel, v.mode);
     const on = v.supported && v.level > 0;
-    setText('nv-vsr-state', '状态：' + (on ? '已激活（' + (NV_LEVEL_TEXT[v.level] || v.level) + '）' : '未激活'));
-    setClass('nv-vsr-dot', 'dot' + (on ? ' on' : ''));
+    setText('nv-vsr-state', on ? t('nv.vsrActive', { level: t('vsrLevel.' + v.level) }) : t('nv.vsrInactive'));
     // GPU 优先级只在自动模式下有意义；驱动没有 0x32F / 0x330 时（priority / indicator 为 null）不显示
     $('nv-priority-row').hidden = !(v.supported && v.mode === 5 && v.priority !== null);
-    for (const r of document.querySelectorAll('input[name="nv-priority"]')) r.checked = Number(r.value) === v.priority;
+    for (const r of radios('nv-priority')) r.checked = Number(r.value) === v.priority;
     $('nv-indicator-row').hidden = nvState.indicator === null;
     $('nv-indicator').checked = nvState.indicator === true;
+    renderSdr();
   }
 
   function renderNvPresets() {
     const presets = settings.nv.presets;
     const ids = presets.map((p) => p.id);
     if (ids.indexOf(nvSelectedId) < 0) nvSelectedId = ids.indexOf(nvLastPresetId) >= 0 ? nvLastPresetId : ids[0] || null;
-    const items = presets.length ? presets.map((p) => [p.id, p.name]) : [['', '还没有预设', true]];
+    const items = presets.length ? presets.map((p) => [p.id, p.name]) : [['', t('nv.noPresets'), true]];
     const sel = $('nv-preset');
     fillSelect(sel, items, nvSelectedId || '');
     sel.disabled = !presets.length;
@@ -626,18 +868,18 @@
     $('nv-apply').disabled = !ready || !presets.length;
     $('nv-delete').disabled = !presets.length;
     $('nv-save').disabled = !ready;
-
     if (nvDeleteArmed && nvDeleteArmed.id !== nvSelectedId) nvDisarmDelete();
+    if (!nvDeleteArmed) setText('nv-delete', t('nv.delete'));
 
-    const opts = [['', '不切换']].concat(presets.map((p) => [p.id, p.name]));
+    const opts = [['', t('nv.noSwitch')]].concat(presets.map((p) => [p.id, p.name]));
     for (const id of ['nv-night-preset', 'nv-day-preset']) {
       fillSelect($(id), opts, settings.nv[id === 'nv-night-preset' ? 'nightPresetId' : 'dayPresetId'] || '');
       $(id).disabled = !presets.length; // 只有「不切换」可选
     }
     const missing = nvMode === 'missing';
     setText('nv-schedule-hint', !presets.length
-      ? (missing ? '需要先安装本地组件，并在上方 NVIDIA 视频设置里保存预设' : '先在上方 NVIDIA 视频设置里保存预设')
-      : '按上面的时段自动切换，与夜间护眼开关无关' + (missing ? '（需要先安装本地组件）' : ''));
+      ? t(missing ? 'nv.scheduleNeedHost' : 'nv.scheduleNeedPresets')
+      : t('nv.scheduleHint') + (missing ? t('nv.scheduleHintMissing') : ''));
   }
 
   function nvNewId() {
@@ -654,7 +896,7 @@
     nvOverwriteName = null;
     if (show) {
       const input = $('nv-preset-name');
-      input.value = L.nvDefaultPresetName(settings.nv.presets);
+      input.value = L.nvDefaultPresetName(settings.nv.presets, lang);
       input.focus();
       input.select();
     }
@@ -665,18 +907,18 @@
     if (!nvState) return;
     const probe = L.nvPresetFromState(nvState, $('nv-preset-name').value, 'probe');
     if (!probe) {
-      nvMessage('请输入预设名称', true);
+      nvMessage(t('nv.enterName'), true);
       $('nv-preset-name').focus();
       return;
     }
     const same = settings.nv.presets.find((p) => p.name === probe.name);
     if (!same && settings.nv.presets.length >= L.NV_MAX_PRESETS) {
-      nvMessage('最多 ' + L.NV_MAX_PRESETS + ' 个预设，请先删除不用的', true);
+      nvMessage(t('nv.maxPresets', { n: L.NV_MAX_PRESETS }), true);
       return;
     }
     if (same && nvOverwriteName !== probe.name) {
       nvOverwriteName = probe.name;
-      nvMessage('将覆盖预设「' + probe.name + '」：再按一次回车或「保存」确认', true);
+      nvMessage(t('nv.overwrite', { name: probe.name }), true);
       $('nv-preset-name').focus();
       return;
     }
@@ -691,7 +933,7 @@
     renderNvPresets();
     nvShowSaveForm(false);
     $('nv-save').focus();
-    nvMessage((same ? '已更新预设：' : '已保存预设：') + preset.name);
+    nvMessage(t(same ? 'nv.updated' : 'nv.saved', { name: preset.name }));
   }
 
   function nvApplyPreset() {
@@ -700,20 +942,20 @@
     const patch = L.nvPresetPatch(p, nvState);
     if (!patch) {
       const h = nvState.hdr;
-      nvMessage(L.nvErrorText(h.supported && h.error ? { code: 'hdr-error', errorCode: h.error } : { code: 'unsupported' }), true);
+      nvMessage(L.nvErrorText(h.supported && h.error ? { code: 'hdr-error', errorCode: h.error } : { code: 'unsupported' }, lang), true);
       return;
     }
-    const partial = patch.hdr ? '' : '（HDR 当前不可用，只套用了超分辨率）';
-    nvMessage('正在套用预设：' + p.name + '…', false, true);
+    const partial = patch.hdr ? '' : t('nv.partial');
+    nvMessage(t('nv.applying', { name: p.name }), false, true);
     // 本地组件确认写入后才提示成功、记下「上次套用的预设」（快捷键从它的下一个开始轮换）
     nvWrite(patch, true, (res) => {
       if (!res || res.ok !== true) {
-        nvMessage('套用预设失败：' + L.nvErrorText(res && res.error), true);
+        nvMessage(t('nv.applyFailed', { err: L.nvErrorText(res && res.error, lang) }), true);
         return;
       }
       nvLastPresetId = p.id;
       call(() => chrome.storage.local.set({ [NV_LAST_PRESET_KEY]: p.id })).catch(noop);
-      nvMessage('已套用预设：' + p.name + partial);
+      nvMessage(t('nv.applied', { name: p.name }) + partial);
     });
   }
 
@@ -721,7 +963,7 @@
     if (!nvDeleteArmed) return;
     clearTimeout(nvDeleteArmed.timer);
     nvDeleteArmed = null;
-    setText('nv-delete', '删除');
+    setText('nv-delete', t('nv.delete'));
   }
 
   // 删除不能撤销：第一次只把按钮变成「确认删除？」，4 秒内再按一次才删
@@ -731,12 +973,12 @@
     if (i < 0) return nvDisarmDelete();
     const p = presets[i];
     const uses = [];
-    if (settings.nv.nightPresetId === p.id) uses.push('夜间');
-    if (settings.nv.dayPresetId === p.id) uses.push('其余时间');
-    const cancels = uses.length ? '，' + uses.join('和') + '的自动切换也会取消' : '';
+    if (settings.nv.nightPresetId === p.id) uses.push(t('nv.useNight'));
+    if (settings.nv.dayPresetId === p.id) uses.push(t('nv.useDay'));
+    const usesText = uses.join(t('nv.and'));
     if (!nvDeleteArmed || nvDeleteArmed.id !== p.id) {
       nvDisarmDelete();
-      const ask = '再按一次删除预设「' + p.name + '」' + cancels;
+      const ask = t('nv.deleteAsk', { name: p.name }) + (uses.length ? t('nv.deleteCancels', { uses: usesText }) : '');
       nvDeleteArmed = {
         id: p.id,
         timer: setTimeout(() => {
@@ -744,7 +986,7 @@
           nvDisarmDelete();
         }, NV_CONFIRM_MS)
       };
-      setText('nv-delete', '确认删除？');
+      setText('nv-delete', t('nv.confirmDelete'));
       nvMessage(ask, true);
       return;
     }
@@ -753,7 +995,7 @@
     nvSelectedId = next ? next.id : null;
     // mergeSettings 会把指向它的夜间 / 其余时间选择变回「不切换」
     save((s) => { s.nv.presets = s.nv.presets.filter((x) => x.id !== p.id); });
-    nvMessage('已删除预设：' + p.name + (uses.length ? '，已同时取消' + uses.join('和') + '的自动切换' : ''), !!uses.length);
+    nvMessage(t('nv.deleted', { name: p.name }) + (uses.length ? t('nv.deletedCancelled', { uses: usesText }) : ''), !!uses.length);
   }
 
   // 拖回起点时 Chrome 不发 change，松手时照样提交一次
@@ -765,6 +1007,130 @@
     if (d.moved && el.value === d.start) nvWrite({ hdr: { [el.dataset.field]: Number(el.value) } }, true);
   }
 
+  // ---------- Windows SDR 亮度 → 建议值 ----------
+
+  function sdrMessage(text, warn) {
+    const el = setText('sdr-msg', text || '');
+    el.classList.toggle('warn', !!warn);
+    clearTimeout(sdrMsgTimer);
+    if (text && !warn) sdrMsgTimer = setTimeout(() => setText('sdr-msg', ''), 4000);
+  }
+
+  function sdrCurrent() {
+    return sdrDisplays ? L.nvPickDisplay(sdrDisplays, settings.nv.displayId) : null;
+  }
+
+  async function sdrRead() {
+    if (!nvCaps.display || sdrBusy) return;
+    sdrBusy = true;
+    renderSdr();
+    let res = null;
+    try {
+      res = await nvRequest({ cmd: 'display' });
+    } finally {
+      sdrBusy = false;
+    }
+    if (!res || res.ok !== true || !Array.isArray(res.displays)) {
+      sdrMessage(L.nvErrorText((res && res.error) || { code: 'host-error' }, lang), true);
+      renderSdr();
+      return;
+    }
+    sdrDisplays = res.displays.map(L.nvNormDisplay).filter(Boolean);
+    sdrFollow();
+    renderSdr();
+  }
+
+  // 跟随 SDR 亮度：白电平和上次调中间灰时不一样就按新的白电平调一次（弹窗开着时由这里做，关着时 background 每 30 秒看一次）
+  function sdrFollow() {
+    if (!settings.nv.followSdr || !nvState || nvBusy()) return;
+    const d = sdrCurrent();
+    const sug = d && L.nvSuggest(d, nvState);
+    if (!sug || d.sdrWhiteNits === sdrLastWhite) return;
+    sdrLastWhite = d.sdrWhiteNits;
+    call(() => chrome.storage.local.set({ [SDR_LAST_KEY]: d.sdrWhiteNits })).catch(noop);
+    if (sug.middleGrey !== nvState.hdr.middleGrey && nvState.hdr.supported && !nvState.hdr.error) {
+      nvWrite({ hdr: { middleGrey: sug.middleGrey } }, true);
+    }
+  }
+
+  function sdrSyncPolling() {
+    const want = settings.nv.followSdr && nvCaps.display && nvMode === 'ready';
+    if (want && !sdrPollTimer) sdrPollTimer = setInterval(sdrRead, SDR_POLL_MS);
+    else if (!want && sdrPollTimer) {
+      clearInterval(sdrPollTimer);
+      sdrPollTimer = 0;
+    }
+  }
+
+  function renderSug(prefix, cur, next, fmt) {
+    setText(prefix + '-cur', fmt(cur));
+    const el = $(prefix + '-new');
+    const same = cur === next;
+    setText(prefix + '-new', same ? t('sdr.same') : '→ ' + fmt(next));
+    el.className = 'sug-new ' + (same ? 'same' : 'change');
+  }
+
+  function renderSdr() {
+    const read = $('sdr-read');
+    setText('sdr-read', sdrBusy ? t('sdr.reading') : sdrDisplays ? t('sdr.reread') : t('sdr.read'));
+    read.disabled = sdrBusy || !nvCaps.display || nvMode !== 'ready';
+    const ready = nvMode === 'ready' && !!nvState;
+    const list = sdrDisplays || [];
+    $('sdr-display-wrap').hidden = list.length < 2;
+    if (list.length >= 2) {
+      const d0 = sdrCurrent();
+      fillSelect($('sdr-display'), list.map((d) => [d.id, d.name || d.id]), d0 ? d0.id : '');
+    }
+    const d = sdrCurrent();
+    const sug = ready && d ? L.nvSuggest(d, nvState) : null;
+    $('sdr-empty').hidden = !!sdrDisplays;
+    $('sdr-body').hidden = !d;
+    $('sdr-actions').hidden = !sug;
+    if (!ready) return;
+    if (nvMode === 'ready' && !nvCaps.display) {
+      if ($('sdr-msg').textContent !== t('nv.err.old-host')) sdrMessage(t('nv.err.old-host'), true);
+      return;
+    }
+    if (!sdrDisplays) return;
+    if (!d) {
+      setText('sdr-msg', t('sdr.noDisplay'));
+      return;
+    }
+    setText('sdr-nits', d.sdrWhiteNits != null ? String(Math.round(d.sdrWhiteNits)) : '—');
+    setText('sdr-sub', t('sdr.sub', { slider: d.sdrSlider != null ? d.sdrSlider : '—' }));
+    $('sdr-sugs').hidden = !sug;
+    if (!sug) {
+      if (!d.hdrEnabled) setText('sdr-msg', t('sdr.hdrOff'));
+      return;
+    }
+    const h = nvState.hdr;
+    renderSug('sug-mg', h.middleGrey, sug.middleGrey, String);
+    renderSug('sug-peak', h.peak, sug.peak, String);
+    renderSug('sug-con', h.contrast, sug.contrast, signed);
+    $('sdr-follow').checked = settings.nv.followSdr;
+  }
+
+  function sdrSync() {
+    const d = sdrCurrent();
+    const sug = d && nvState ? L.nvSuggest(d, nvState) : null;
+    if (!sug) return;
+    const h = nvState.hdr;
+    const hdr = {};
+    if ($('sug-mg').checked && sug.middleGrey !== h.middleGrey) hdr.middleGrey = sug.middleGrey;
+    if ($('sug-peak').checked && sug.peak !== h.peak) hdr.peak = sug.peak;
+    if ($('sug-con').checked && sug.contrast !== h.contrast) hdr.contrast = sug.contrast;
+    sdrLastWhite = d.sdrWhiteNits;
+    call(() => chrome.storage.local.set({ [SDR_LAST_KEY]: d.sdrWhiteNits })).catch(noop);
+    if (!Object.keys(hdr).length) {
+      sdrMessage(t('sdr.nothing'));
+      return;
+    }
+    nvWrite({ hdr: hdr }, true, (res) => {
+      if (res && res.ok === true) sdrMessage(t('sdr.synced'));
+      else sdrMessage(L.nvErrorText(res && res.error, lang), true);
+    });
+  }
+
   function nvBind() {
     for (const f of NV_SLIDERS) {
       const el = $('nv-' + f);
@@ -772,6 +1138,7 @@
       el.addEventListener('pointerdown', () => { nvDrag = { id: el.id, start: el.value, moved: false }; });
       el.addEventListener('input', () => {
         if (nvDrag && nvDrag.id === el.id) nvDrag.moved = true;
+        sliderFill(el);
         nvWrite({ hdr: { [f]: Number(el.value) } }, false);
       });
       el.addEventListener('change', () => {
@@ -793,12 +1160,28 @@
       el.value = String(peak); // 超出范围时写回夹过的值
       nvWrite({ hdr: { peak: peak } }, true);
     });
-    onChange('nv-hdr', (el) => nvWrite({ hdr: { enabled: el.checked } }, true));
+    onChange('nv-hdr', (el) => {
+      dropHdrOnlyLease();
+      nvWrite({ hdr: { enabled: el.checked } }, true);
+    });
     onChange('nv-vsr', (el) => nvWrite({ vsr: { mode: Number(el.value) } }, 'soon'));
-    for (const r of document.querySelectorAll('input[name="nv-priority"]')) {
+    for (const r of radios('nv-priority')) {
       r.addEventListener('change', () => { if (r.checked) nvWrite({ vsr: { priority: Number(r.value) } }, true); });
     }
     onChange('nv-indicator', (el) => nvWrite({ indicator: el.checked }, true));
+
+    $('sdr-read').addEventListener('click', () => sdrRead());
+    $('sdr-sync').addEventListener('click', sdrSync);
+    onChange('sdr-display', (el) => save((s) => { s.nv.displayId = el.value || null; }));
+    onChange('sdr-follow', (el) => {
+      // 第一次打开时立刻按当前白电平调一次
+      if (el.checked) {
+        sdrLastWhite = null;
+        call(() => chrome.storage.local.remove(SDR_LAST_KEY)).catch(noop);
+      }
+      save((s) => { s.nv.followSdr = el.checked; });
+      if (el.checked) sdrRead();
+    });
 
     $('nv-preset').addEventListener('change', (e) => {
       nvSelectedId = e.target.value || null;
@@ -834,6 +1217,15 @@
     window.addEventListener('pagehide', () => {
       clearTimeout(nvThrottle);
       nvThrottle = 0;
+      if (accentTimer) {
+        clearTimeout(accentTimer);
+        accentTimer = 0;
+        const v = $('theme-custom').value;
+        if (v) {
+          settings = L.mergeSettings(Object.assign({}, settings, { ui: Object.assign({}, settings.ui, { accent: v }) }));
+          flushSave();
+        }
+      }
       if (saveTimer) flushSave();
       const pending = L.nvMergePatch(nvQueued, nvDraft);
       nvQueued = null;
@@ -854,17 +1246,21 @@
 
   // ---------- 快捷键 ----------
 
-  async function renderShortcuts() {
+  async function loadCommands() {
+    try { commands = (await chrome.commands.getAll()) || []; } catch (e) { commands = []; }
+  }
+
+  function renderShortcuts() {
     const ul = $('shortcuts');
-    let cmds = [];
-    try { cmds = await chrome.commands.getAll(); } catch (e) { cmds = []; }
     ul.textContent = '';
-    for (const c of cmds || []) {
+    for (const c of commands) {
       if (c.name === '_execute_action' && !c.shortcut) continue;
       const li = document.createElement('li');
       const desc = document.createElement('span');
       desc.className = 'desc';
-      desc.textContent = c.description || COMMAND_NAMES[c.name] || c.name;
+      const key = 'cmd.' + c.name;
+      const name = t(key);
+      desc.textContent = name !== key ? name : c.description || c.name;
       li.appendChild(desc);
       if (c.shortcut) {
         const k = document.createElement('kbd');
@@ -873,7 +1269,7 @@
       } else {
         const u = document.createElement('span');
         u.className = 'unset';
-        u.textContent = '未设置';
+        u.textContent = t('keys.unset');
         li.appendChild(u);
       }
       ul.appendChild(li);
@@ -893,16 +1289,23 @@
     usable = tabId !== null && scriptable(url);
     isFile = /^file:/i.test(url);
     tabHost = usable ? L.normalizeHost(L.hostOf(url)) : '';
-    $('site-host').textContent = tabHost ? '（' + tabHost + '）' : '';
+    $('site-host').textContent = tabHost || '';
     $('site-rule').disabled = !tabHost;
 
     let hotkeyError = null;
+    let savedTab = 'video';
     try {
-      const r = await chrome.storage.local.get(['settings', NV_LAST_PRESET_KEY, NV_HOTKEY_ERROR_KEY]);
+      const r = await chrome.storage.local.get(['settings', NV_LAST_PRESET_KEY, NV_HOTKEY_ERROR_KEY, TAB_KEY, HDR_ONLY_KEY, SDR_LAST_KEY]);
       settings = L.mergeSettings(r && r.settings);
       nvLastPresetId = (r && r[NV_LAST_PRESET_KEY]) || null;
       hotkeyError = r && r[NV_HOTKEY_ERROR_KEY];
+      savedTab = (r && r[TAB_KEY]) || 'video';
+      hdrOnlyStatus = (r && r[HDR_ONLY_KEY]) || null;
+      sdrLastWhite = r && typeof r[SDR_LAST_KEY] === 'number' ? r[SDR_LAST_KEY] : null;
     } catch (e) { /* 用默认值 */ }
+    await loadCommands();
+    selectTab(savedTab, false);
+    bindTabs();
     renderSettings();
     bind();
     nvBind();
@@ -912,7 +1315,6 @@
       const age = Date.now() - (+hotkeyError.at || 0);
       if (typeof hotkeyError.text === 'string' && age >= 0 && age < NV_HOTKEY_ERROR_MAX_AGE) nvMessage(hotkeyError.text.slice(0, 200), true);
     }
-    renderShortcuts();
     nvStart().catch(() => nvFailed(null)); // NVIDIA 设置与当前页面无关，chrome:// 页面也能用
 
     if (!usable) {
@@ -923,5 +1325,5 @@
     setInterval(refresh, REFRESH_MS);
   }
 
-  init().catch(() => showMessage('此页面无法使用', false));
+  init().catch(() => showMessage(t('video.unusable'), false));
 })();

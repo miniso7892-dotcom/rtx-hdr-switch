@@ -21,7 +21,7 @@
 - 自动处理白底视频；
 - 护眼功能。
 
-界面全部用简体中文。
+界面用简体中文（1.2 起中英双语，见文末「1.2」一节）。
 
 ## 文件结构（仓库根目录）
 
@@ -30,7 +30,7 @@
 - `lib.js`：纯逻辑。浏览器端作为内容脚本先于 content.js 注入；Node 端用 `if (typeof module !== 'undefined') module.exports = ...` 导出以便测试。不得引用 `chrome` 或 `document`。
 - `content.js`：内容脚本
 - `popup.html` / `popup.css` / `popup.js`
-- `icons/icon16.png`、`icon32.png`、`icon48.png`、`icon128.png`：用 Python Pillow 生成，主题是「HDR」字样或太阳图形。所有图标的生成脚本放在 `tools/make_icons.py`。
+- `icons/icon16.png`、`icon32.png`、`icon48.png`、`icon128.png`：用 Python Pillow 生成（`tools/make_icons.py [--accent #RRGGBB]`）。1.2 起是 C 风格图标：黑色圆角方块里一块左白右黑的「屏幕」，中间一道主题色分割线；运行时由 `icon-draw.js` 按主题色重画。
 - `test/lib.test.js`：用 `node:assert` 写，`node test/lib.test.js` 直接运行，不依赖第三方包。
 - `README.md`（英文）/ `README.zh-CN.md`（中文）：安装与使用说明，两者互相链接。
 - `LICENSE`：MIT。
@@ -179,7 +179,7 @@
 
 按视频的规则单独存成 `v:<key>` 条目。超过 2000 条时，按时间删除最旧的（在 lib.js 里写纯函数 `pruneKeys(entries, max)`，content 或 background 写入时调用）。
 
-## 弹窗（popup，宽约 340px，简体中文，跟随系统深浅色）
+## 弹窗（1.0 / 1.1 版，宽约 340px；1.2 起的改版见文末「1.2」一节）
 
 1. **标题**：「RTX HDR 开关」，小字说明「关闭时该视频的 RTX 超分也会一起关闭（Chrome 限制）」。
 2. **当前视频卡片**：
@@ -213,3 +213,29 @@
   - `mergeSettings` 对缺失或旧字段的处理；
   - `pruneKeys`。
 - `manifest.json` 必须是合法 JSON，并且引用的文件都存在。
+
+## 1.2：界面改版与新功能（2026-10-21）
+
+**界面（C · 高反差信号）**：黑白两色加一个主题色；数字用 Anton，界面拉丁字母用 Archivo（`fonts/`，OFL，只含 latin 子集），中文用系统的微软雅黑。弹窗 360×600，分「视频 / NVIDIA / 规则」三个页签，前两个页签不用滚动（Chrome 弹窗最高 600px）。跟随系统深浅色；深色下 SDR 状态块用深灰，不用大块亮白。
+
+**中英双语**：`i18n.js`（纯数据 + `t(lang, key, params)`、`resolve(setting, uiLanguage)`）在弹窗、选项页、内容脚本、service worker 里都先于 `lib.js` 加载。设置 `ui.lang`：`auto`（浏览器界面语言以 zh 开头时中文，否则英文）/ `zh` / `en`，弹窗右上角切换后立即生效。`lib.js` 的文字函数（`reasonText`、`osdText`、`nvErrorText` 等）多一个 `lang` 参数，省略时是中文，和旧输出一致。扩展名称、说明和快捷键说明走 `_locales`（`default_locale: en`）。测试保证两种语言的键一一对应、占位符一致，页面和脚本里用到的键都存在。
+
+**主题色**：`ui.accent`，6 个预设（荧光绿 #C8FF2E、明黄 #FFE600、信号橙 #FF7A1A、霓虹粉 #FF5CA8、电光青 #22E1FF、薰衣紫 #A98BFF，默认薰衣紫）加自定义。`accentInk(hex)` 按相对亮度在黑字和白字里选对比度更高的（分界约 0.18），主题色太暗时放在黑底上的文字改用白色。弹窗用 CSS 变量；工具栏图标由 `icon-draw.js`（OffscreenCanvas）重画后 `action.setIcon`（浏览器启动、安装和换色时）；角标 HDR 用主题色，SDR 黑底白字，DRM 灰底白字；屏幕提示是黑底白字加一个主题色小方块。
+
+**读取 Windows SDR 亮度，一键同步**：本地组件 `display` 命令（user32 `QueryDisplayConfig` + `DisplayConfigGetDeviceInfo`，只读）给出每台显示器的 SDR 白电平。建议值（`nvSuggest`）：中间灰 = SDR 白 × 0.2158（sRGB 128/255 的线性亮度，让 RTX HDR 的 50% 灰和桌面上的一样亮），夹到 10..100；最高亮度 = min(显卡上限, 1000)（驱动实测输出到约 1000 尼特为止）；对比度 +25（实测伽马约 2.18，接近 Windows 显示 SDR 内容的曲线）；不碰饱和度。「跟随 SDR 亮度」（`nv.followSdr`）：白电平和上次调中间灰时（`nvLastSdrWhite`）不一样才调，弹窗开着时每 2 秒看一次，关着时 background 的 `nv-follow` alarm 每 30 秒看一次（所以 `minimum_chrome_version` 提到 120）。
+
+**中间灰快捷键**：`nv-mg-up` / `nv-mg-down`（建议 `Alt+Shift+Up` / `Alt+Shift+Down`），读当前值 ±5 夹到 10..100 再写，到头只提示。四个建议快捷键正好用满 Chrome 的上限。
+
+**只关 HDR，保留超分（`hdrOnly`）**：实测页面层面没有办法只关某个视频的 HDR（`dynamic-range-limit` 对 overlay 路径无效；`swap_chain_presenter.cc` 里 auto HDR 只看片源是否 SDR、显示器是否 HDR、驱动、是否用电池），但播放中切换 NVIDIA 全局 HDR 开关（0x318 enabled 位）0.1–0.3 秒内生效、超分不受影响、白色正好落到 SDR 白（实测 996.5 → 480.2 尼特，和页面自身的白一致）。所以这个模式下：
+- 内容脚本不给想关的视频加滤镜（视频仍走 overlay，超分保留），只照常上报决策；
+- background 看当前窗口的当前标签页：主视频想关（不是 DRM）就通过常驻的 `connectNative` 端口向本地组件 `hdrLease on:true` 借用全局开关，否则 `on:false` 还回去并断开端口；
+- 本地组件在端口断开（浏览器退出或崩溃、扩展重载）时自己把开关恢复；
+- 用户在弹窗里亲手改全局 HDR 时，弹窗让 background `hdrLease on:false, restore:false` 放手，这个视频不再借；
+- 状态写在 `storage.local` 的 `hdrOnlyStatus`（`{active, leased, error?}`）：`active` 为真时内容脚本才不加滤镜；本地组件不支持（没有 `caps: hdrLease`）或借用失败时 `active` 为假，退回逐视频滤镜，60 秒后再试。
+- 代价写在界面上：关的是全局 HDR，同时播放的其他视频也会变成 SDR。
+
+**备份**：选项页 `options.html`（文件选择框会关掉弹窗，所以放在单独的页面）。导出 `{format:'rtx-hdr-switch-backup', version:1, exportedAt, extensionVersion, settings, videos}`，只含设置和按视频的记忆；导入前 `validateBackup` 检查格式和版本、按 `mergeSettings` 规范化、视频记忆超过 2000 条只留最新的，显示摘要，确认后覆盖。
+
+**全局关闭提示**：本地组件已连接、NVIDIA 全局 HDR 关着（且不是「只关 HDR」在借用）时，视频页签顶部提示并给「开启」按钮；HDR 出错（Windows 没开 HDR 等）时显示原因。
+
+测试：`node test/lib.test.js`（i18n、主题色、建议值、备份、manifest 与 `_locales`）；service worker 逻辑和真实本地组件的端到端在开发时用一次性的 headless Chrome（CDP `Extensions.loadUnpacked`）验证。

@@ -6,8 +6,10 @@
  */
 'use strict';
 
-importScripts('lib.js');
+importScripts('i18n.js', 'lib.js');
+try { importScripts('icon-draw.js'); } catch (e) { /* 没有图标绘制脚本时沿用 manifest 里的静态图标 */ }
 const L = self.RtxHdrLib;
+const I18N = self.RtxHdrI18n;
 
 const STALE_MS = 10000;
 // 子 frame 有视频时每 3 秒一次心跳；超过这么久没消息就当它已经不在了（iframe 被移除、页面已离开）
@@ -30,12 +32,17 @@ const NV_GIVE_UP = new Set(['no-dll', 'host-forbidden', 'bad-request', 'range'])
 const NV_NOT_WRITTEN = new Set(['host-missing', 'host-forbidden', 'no-dll', 'init', 'bad-request', 'range', 'unsupported', 'hdr-error']);
 // 写入阶段出错时本时段最多试这么多次，免得每分钟把用户的手动修改覆盖回去
 const NV_MAX_WRITE_FAILS = 3;
-const BADGE = {
-  on: { text: 'HDR', color: '#2e7d32' },
-  off: { text: 'SDR', color: '#616161' },
-  // DRM 视频扩展管不了：不显示 HDR/SDR，免得和实际情况相反
-  drm: { text: 'DRM', color: '#8d6e00' }
-};
+// 跟随 SDR 亮度：弹窗关着时每 30 秒看一次 Windows 的 SDR 白电平
+const NV_FOLLOW_ALARM = 'nv-follow';
+const SDR_LAST_KEY = 'nvLastSdrWhite';
+// 「只关 HDR」模式的状态，内容脚本和弹窗读它：{active, leased, error?}
+const HDR_ONLY_KEY = 'hdrOnlyStatus';
+const HO_DEBOUNCE_MS = 150;
+const HO_RETRY_MS = 60000; // 借全局开关失败后隔这么久再试
+const MG_STEP = 5;
+// 角标：HDR 用主题色，SDR 黑底白字；DRM 视频扩展管不了，不显示 HDR/SDR，免得和实际情况相反
+const BADGE_SDR = { text: 'SDR', color: '#0A0A0A', textColor: '#FAFAFA' };
+const BADGE_DRM = { text: 'DRM', color: '#6B6B6B', textColor: '#FFFFFF' };
 
 const tabState = new Map(); // tabId → {frames: {frameId: report}, topDoc}
 const tabLoads = new Map(); // tabId → 正在从 storage.session 恢复的 Promise
@@ -182,6 +189,7 @@ async function handleReport(msg, sender) {
 
   schedulePersist(tabId);
   await refreshBadge(tabId, t);
+  if (settingsCache && settingsCache.hdrOnly) hoSchedule();
   return eyeReply;
 }
 
@@ -201,28 +209,56 @@ function scheduleRecheck(tabId, best) {
   }, delay));
 }
 
-function badgeFor(report) {
+function badgeFor(report, accent) {
   if (!report) return null;
-  if (report.drm) return BADGE.drm;
-  return BADGE[report.state] || null;
+  if (report.drm) return BADGE_DRM;
+  if (report.state === 'off') return BADGE_SDR;
+  if (report.state !== 'on') return null;
+  const ink = L.accentInk(accent);
+  return { text: 'HDR', color: ink.accent, textColor: ink.on };
 }
 
 async function refreshBadge(tabId, t) {
   const best = bestFrame(t);
   scheduleRecheck(tabId, best);
-  const b = badgeFor(best && best.report);
-  const text = b ? b.text : '';
-  if (badgeSig.get(tabId) === text) return;
-  badgeSig.set(tabId, text);
+  const s = await getSettings();
+  const b = badgeFor(best && best.report, s.ui.accent);
+  const sig = b ? b.text + '|' + b.color + '|' + b.textColor : '';
+  if (badgeSig.get(tabId) === sig) return;
+  badgeSig.set(tabId, sig);
   const a = chrome.action;
-  const jobs = [call(() => a.setBadgeText({ tabId, text }))];
+  const jobs = [call(() => a.setBadgeText({ tabId, text: b ? b.text : '' }))];
   if (b) {
     jobs.push(call(() => a.setBadgeBackgroundColor({ tabId, color: b.color })));
-    jobs.push(call(() => a.setBadgeTextColor({ tabId, color: '#ffffff' })));
+    jobs.push(call(() => a.setBadgeTextColor({ tabId, color: b.textColor })));
   }
   const results = await Promise.allSettled(jobs);
   // tab 已关闭等原因失败时，下次报告再试
-  if (results.some((r) => r.status === 'rejected') && badgeSig.get(tabId) === text) badgeSig.delete(tabId);
+  if (results.some((r) => r.status === 'rejected') && badgeSig.get(tabId) === sig) badgeSig.delete(tabId);
+}
+
+// 换了主题色：所有标签页的角标重画
+function refreshAllBadges() {
+  badgeSig.clear();
+  for (const [tabId, t] of tabState) refreshBadge(tabId, t).catch(noop);
+}
+
+// 工具栏图标中间那道分割线用主题色（浏览器重启后会回到 manifest 的静态图标，启动时再画一次）
+function applyIcon(accent) {
+  const icon = self.RtxHdrIcon;
+  if (!icon || typeof icon.imageDataSet !== 'function') return Promise.resolve();
+  let imageData = null;
+  try { imageData = icon.imageDataSet(L.normAccent(accent)); } catch (e) { imageData = null; }
+  if (!imageData) return Promise.resolve();
+  return call(() => chrome.action.setIcon({ imageData: imageData })).catch(noop);
+}
+
+// 界面语言：设置里的（自动时按浏览器界面语言）
+let uiLanguage = '';
+try { uiLanguage = chrome.i18n.getUILanguage(); } catch (e) { uiLanguage = ''; }
+
+function langOf(s) {
+  return I18N ? I18N.resolve(s && s.ui ? s.ui.lang : 'auto', uiLanguage) : 'zh';
 }
 
 // ---------- 护眼计时（跨视频、跨标签页累计） ----------
@@ -316,6 +352,20 @@ chrome.storage.onChanged.addListener((changes, area) => {
     settingsCache = L.mergeSettings(changes.settings.newValue);
     // 改了时段或时段预设：马上检查一次（记录里的时段或预设对不上就套用新的）
     if (nvScheduleSig(prev) !== nvScheduleSig(settingsCache)) nvScheduleCheck();
+    if (prev.ui.accent !== settingsCache.ui.accent) {
+      applyIcon(settingsCache.ui.accent);
+      refreshAllBadges();
+    }
+    if (prev.nv.followSdr !== settingsCache.nv.followSdr || prev.nv.displayId !== settingsCache.nv.displayId) {
+      nvSyncFollowAlarm(settingsCache);
+      if (settingsCache.nv.followSdr) nvFollowCheck();
+    }
+    if (prev.hdrOnly !== settingsCache.hdrOnly) {
+      hoCaps = null; // 重新探测本地组件
+      hoRetryAt = 0;
+      hoSuppress = null;
+      hoSchedule();
+    }
     const e = settingsCache.eye;
     // 关掉提醒或「到时自动切回 SDR」：正在进行的护眼 SDR 也结束
     if (!e.minutes || !e.autoOff) {
@@ -367,6 +417,8 @@ async function sendToBestFrame(tabId, msg) {
 
 async function handleCommand(command, tab) {
   if (command === 'nv-next-preset') return nvNextPreset();
+  if (command === 'nv-mg-up') return nvMgHotkey(MG_STEP);
+  if (command === 'nv-mg-down') return nvMgHotkey(-MG_STEP);
   if (!tab || !validTabId(tab.id)) tab = await activeTab();
   if (!tab || !validTabId(tab.id)) return;
   if (await sendToBestFrame(tab.id, { type: 'command', command: command })) return;
@@ -436,32 +488,291 @@ async function nvApplyPreset(preset, onlyHdr) {
   return hdrSkipped ? Object.assign({}, res, { hdrSkipped: true }) : res;
 }
 
+// 在当前标签页的视频上显示提示；warn（失败等）关了屏幕提示也显示，页面上显示不了时留到下次打开弹窗
+async function hotkeyOsd(text, warn) {
+  const tab = await activeTab();
+  const shown = !!tab && validTabId(tab.id) && await sendToBestFrame(tab.id, { type: 'osd', text: text, warn: warn });
+  if (warn && !shown) await call(() => chrome.storage.local.set({ [NV_HOTKEY_ERROR_KEY]: { text: text, at: Date.now() } })).catch(noop);
+}
+
 async function nvNextPreset() {
   const s = await getSettings();
+  const lang = langOf(s);
   const presets = s.nv.presets;
   let text;
   let warn = true; // 失败或只套用了一部分
   if (!presets.length) {
-    text = '还没有 NVIDIA 预设，请先在弹窗里保存';
+    text = L.t(lang, 'bg.noPresets');
   } else {
     const r = await call(() => chrome.storage.local.get(NV_LAST_PRESET_KEY)).catch(() => null);
     const id = L.nvNextPresetId(presets, r && r[NV_LAST_PRESET_KEY]);
     const preset = presets.find((p) => p.id === id);
     const res = await nvApplyPreset(preset, false);
     if (res.ok !== true) {
-      text = 'NVIDIA 预设切换失败：' + L.nvErrorText(res.error);
+      text = L.t(lang, 'bg.presetFailed', { err: L.nvErrorText(res.error, lang) });
     } else if (res.hdrSkipped) {
-      text = 'NVIDIA 预设：' + preset.name + '（HDR 当前不可用，只套用了超分辨率）';
+      text = L.t(lang, 'bg.presetPartial', { name: preset.name });
     } else {
-      text = 'NVIDIA 预设：' + preset.name;
+      text = L.t(lang, 'bg.preset', { name: preset.name });
       warn = false;
     }
   }
-  const tab = await activeTab();
-  const shown = !!tab && validTabId(tab.id) && await sendToBestFrame(tab.id, { type: 'osd', text: text, warn: warn });
-  // 当前标签页显示不了（chrome:// 页面、新标签页等）：留到下次打开弹窗时显示
-  if (warn && !shown) await call(() => chrome.storage.local.set({ [NV_HOTKEY_ERROR_KEY]: { text: text, at: Date.now() } })).catch(noop);
+  await hotkeyOsd(text, warn);
 }
+
+// 快捷键：中间灰 ±5（读当前值再写，到头了只提示）
+async function nvMgHotkey(delta) {
+  const s = await getSettings();
+  const lang = langOf(s);
+  const fail = (err) => hotkeyOsd(L.t(lang, 'bg.nvFailed', { err: L.nvErrorText(err, lang) }), true);
+  const got = await nvCall({ cmd: 'get' });
+  const st = got && got.ok === true ? L.nvNormState(got.state) : null;
+  if (!st) return fail(got && got.error);
+  if (!st.hdr.supported) return fail({ code: 'unsupported', field: 'hdr' });
+  if (st.hdr.error) return fail({ code: 'hdr-error', errorCode: st.hdr.error });
+  const step = L.nvMgStep(st, delta);
+  if (!step.changed) return hotkeyOsd(L.t(lang, 'bg.mgLimit', { value: step.value }), false);
+  const res = await nvCall({ cmd: 'set', hdr: { middleGrey: step.value }, commit: true });
+  if (!res || res.ok !== true) return fail(res && res.error);
+  return hotkeyOsd(L.t(lang, 'bg.mg', { value: step.value, delta: (delta > 0 ? '+' : '−') + Math.abs(delta) }), false);
+}
+
+// ---------- 跟随 Windows SDR 亮度 ----------
+
+async function nvSyncFollowAlarm(s) {
+  if (s.nv.followSdr) {
+    const a = await call(() => chrome.alarms.get(NV_FOLLOW_ALARM)).catch(() => null);
+    if (!a) await call(() => chrome.alarms.create(NV_FOLLOW_ALARM, { periodInMinutes: 0.5 })).catch(noop);
+  } else {
+    await call(() => chrome.alarms.clear(NV_FOLLOW_ALARM)).catch(noop);
+  }
+}
+
+let nvFollowing = null;
+
+// 白电平和上次调中间灰时不一样才调：用户之后手动改的中间灰在 SDR 亮度再变之前不会被覆盖
+function nvFollowCheck() {
+  if (nvFollowing) return nvFollowing;
+  nvFollowing = (async () => {
+    const s = await getSettings();
+    if (!s.nv.followSdr) return;
+    const res = await nvCall({ cmd: 'display' });
+    if (!res || res.ok !== true || !Array.isArray(res.displays)) return;
+    const d = L.nvPickDisplay(res.displays, s.nv.displayId);
+    if (!d || !d.hdrEnabled || d.sdrWhiteNits == null) return;
+    const r = await call(() => chrome.storage.local.get(SDR_LAST_KEY)).catch(() => null);
+    if (r && r[SDR_LAST_KEY] === d.sdrWhiteNits) return;
+    const got = await nvCall({ cmd: 'get' });
+    const st = got && got.ok === true ? L.nvNormState(got.state) : null;
+    if (!st) return;
+    await call(() => chrome.storage.local.set({ [SDR_LAST_KEY]: d.sdrWhiteNits })).catch(noop);
+    const sug = L.nvSuggest(d, st);
+    if (!sug || !st.hdr.supported || st.hdr.error || sug.middleGrey === st.hdr.middleGrey) return;
+    const set = await nvCall({ cmd: 'set', hdr: { middleGrey: sug.middleGrey }, commit: true });
+    if (set && set.ok === true && s.osd) {
+      const tab = await activeTab();
+      if (tab && validTabId(tab.id)) await sendToBestFrame(tab.id, { type: 'osd', text: L.t(langOf(s), 'bg.follow', { value: sug.middleGrey }), warn: false });
+    }
+  })().catch(noop).then(() => { nvFollowing = null; });
+  return nvFollowing;
+}
+
+// ---------- 只关 HDR（保留超分）：向本地组件借用全局 HDR 开关 ----------
+// 当前窗口的当前标签页里，主视频想关 HDR 时借（本地组件关掉全局 HDR，超分不受影响），否则还。
+// 借用通过常驻的 native 端口：浏览器退出、扩展重载或端口断开时本地组件自己把 HDR 恢复。
+
+let hoCaps = null; // null 未探测；true 本地组件支持 hdrLease；false 不支持或不可用
+let hoCapsError = null;
+let hoLease = null; // {port, waiters, seq, held}
+let hoTimer = 0;
+let hoRunning = null;
+let hoAgain = false;
+let hoRetryAt = 0;
+let hoLastError = null;
+let hoSuppress = null; // {tabId, key}：用户在弹窗里亲手改了全局 HDR，这个视频不再借
+let hoStatusSig = '';
+
+function hoSchedule() {
+  clearTimeout(hoTimer);
+  hoTimer = setTimeout(() => {
+    hoTimer = 0;
+    hoEvaluate();
+  }, HO_DEBOUNCE_MS);
+}
+
+function hoOpen() {
+  if (hoLease) return hoLease;
+  let port;
+  try { port = chrome.runtime.connectNative(L.NV_HOST); } catch (e) { return null; }
+  const lease = { port: port, waiters: [], seq: 0, held: false };
+  port.onMessage.addListener((res) => {
+    if (!res || typeof res !== 'object') return;
+    const i = res.id == null ? 0 : lease.waiters.findIndex((w) => w.id === res.id);
+    if (i < 0 || !lease.waiters.length) return;
+    lease.waiters.splice(i, 1)[0].done(res);
+  });
+  port.onDisconnect.addListener(() => {
+    const err = chrome.runtime.lastError;
+    const fail = L.nvPortError(err && err.message);
+    for (const w of lease.waiters.splice(0)) w.done(fail);
+    // 本地组件收到 EOF 时已经把 HDR 恢复了
+    if (hoLease === lease) {
+      hoLease = null;
+      if (lease.held) hoSchedule();
+    }
+  });
+  hoLease = lease;
+  return lease;
+}
+
+function hoRequest(lease, msg) {
+  return new Promise((resolve) => {
+    const id = ++lease.seq;
+    const w = { id: id, done: null };
+    const timer = setTimeout(() => {
+      const i = lease.waiters.indexOf(w);
+      if (i >= 0) lease.waiters.splice(i, 1);
+      resolve({ ok: false, error: { code: 'timeout' } });
+    }, NV_TIMEOUT_MS);
+    w.done = (res) => {
+      clearTimeout(timer);
+      resolve(res);
+    };
+    lease.waiters.push(w);
+    try {
+      lease.port.postMessage(Object.assign({ id: id }, msg));
+    } catch (e) {
+      const i = lease.waiters.indexOf(w);
+      if (i >= 0) lease.waiters.splice(i, 1);
+      w.done(L.nvPortError((e && e.message) || 'error'));
+    }
+  });
+}
+
+async function hoAcquire() {
+  if (hoLease && hoLease.held) return true;
+  const lease = hoOpen();
+  if (!lease) {
+    hoLastError = { code: 'host-error' };
+    return false;
+  }
+  const res = await hoRequest(lease, { cmd: 'hdrLease', on: true });
+  if (res && res.ok === true) {
+    lease.held = true;
+    hoLastError = null;
+    return true;
+  }
+  hoLastError = (res && res.error) || { code: 'host-error' };
+  hoClose(lease);
+  return false;
+}
+
+function hoClose(lease) {
+  if (hoLease === lease) hoLease = null;
+  try { lease.port.disconnect(); } catch (e) { /* ignore */ }
+}
+
+// restore:false：用户亲手改了全局 HDR，以用户的为准，不再恢复
+async function hoRelease(restore) {
+  const lease = hoLease;
+  if (!lease) return;
+  if (lease.held) {
+    await hoRequest(lease, { cmd: 'hdrLease', on: false, restore: restore !== false });
+    lease.held = false;
+  }
+  hoClose(lease);
+}
+
+async function hoProbe() {
+  const hello = await nvCall({ cmd: 'hello' });
+  if (hello && hello.ok === true) {
+    hoCaps = Array.isArray(hello.caps) && hello.caps.indexOf('hdrLease') >= 0;
+    hoCapsError = hoCaps ? null : { code: 'old-host' };
+  } else {
+    hoCaps = false;
+    hoCapsError = (hello && hello.error) || { code: 'host-error' };
+  }
+}
+
+async function hoSetStatus(st) {
+  const sig = JSON.stringify(st);
+  if (sig === hoStatusSig) return;
+  hoStatusSig = sig;
+  await call(() => chrome.storage.local.set({ [HDR_ONLY_KEY]: st })).catch(noop);
+}
+
+// 当前窗口的当前标签页：主视频想关（不是 DRM）就要借
+async function hoWanted() {
+  const tab = await activeTab();
+  if (!tab || !validTabId(tab.id)) return false;
+  const best = bestFrame(await getTab(tab.id));
+  const r = best && best.report;
+  if (!r || !r.hasVideo || r.drm || r.state !== 'off') return false;
+  if (hoSuppress && hoSuppress.tabId === tab.id && hoSuppress.key === r.key) return false;
+  if (hoSuppress && (hoSuppress.tabId !== tab.id || hoSuppress.key !== r.key)) hoSuppress = null;
+  return true;
+}
+
+function hoEvaluate() {
+  if (hoRunning) {
+    hoAgain = true;
+    return hoRunning;
+  }
+  hoRunning = (async () => {
+    do {
+      hoAgain = false;
+      await hoEvaluateOnce().catch(noop);
+    } while (hoAgain);
+    hoRunning = null;
+  })();
+  return hoRunning;
+}
+
+async function hoEvaluateOnce() {
+  const s = await getSettings();
+  if (!s.hdrOnly) {
+    await hoRelease(true);
+    await hoSetStatus({ active: false, leased: false });
+    return;
+  }
+  if (hoCaps === null) await hoProbe();
+  if (!hoCaps) {
+    await hoRelease(true);
+    await hoSetStatus({ active: false, leased: false, error: hoCapsError });
+    return;
+  }
+  if (Date.now() < hoRetryAt) return; // 上次借失败了：这段时间按逐视频滤镜处理
+  if (await hoWanted()) {
+    if (!(await hoAcquire())) {
+      hoRetryAt = Date.now() + HO_RETRY_MS;
+      await hoSetStatus({ active: false, leased: false, error: hoLastError });
+      setTimeout(hoSchedule, HO_RETRY_MS + 100);
+      return;
+    }
+  } else {
+    await hoRelease(true);
+  }
+  await hoSetStatus({ active: true, leased: !!(hoLease && hoLease.held) });
+}
+
+// 用户在弹窗里亲手改了全局 HDR：把开关还给用户（不恢复），这个视频不再借
+async function hoDrop() {
+  const tab = await activeTab();
+  const best = tab && validTabId(tab.id) ? bestFrame(await getTab(tab.id)) : null;
+  hoSuppress = tab && best && best.report ? { tabId: tab.id, key: best.report.key } : null;
+  await hoRelease(false);
+  const s = await getSettings();
+  await hoSetStatus({ active: !!(s.hdrOnly && hoCaps), leased: false });
+}
+
+chrome.tabs.onActivated.addListener(() => {
+  if (settingsCache && settingsCache.hdrOnly) hoSchedule();
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  // 焦点离开浏览器（WINDOW_ID_NONE）时保持现状
+  if (windowId !== chrome.windows.WINDOW_ID_NONE && settingsCache && settingsCache.hdrOnly) hoSchedule();
+});
 
 function nvScheduled(s) {
   return !!(s.nv.nightPresetId || s.nv.dayPresetId);
@@ -553,15 +864,26 @@ function nvScheduleCheck() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm && alarm.name === NV_ALARM) nvScheduleCheck();
+  else if (alarm && alarm.name === NV_FOLLOW_ALARM) nvFollowCheck();
 });
+
+// 浏览器启动：主题色图标、跟随 SDR 的闹钟、「只关 HDR」的状态（上次的借用在浏览器退出时已由本地组件还掉）
+async function onBrowserStart() {
+  const s = await getSettings();
+  await applyIcon(s.ui.accent);
+  await nvSyncFollowAlarm(s);
+  hoStatusSig = '';
+  hoSchedule();
+}
 
 chrome.runtime.onStartup.addListener(() => {
   nvScheduleCheck();
+  onBrowserStart().catch(noop);
 });
 
 // 弹窗的兜底通道（弹窗自己的 connectNative 端口不可用时）
 function nvHandle(msg) {
-  if (msg.op === 'hello' || msg.op === 'get') return nvCall({ cmd: msg.op });
+  if (msg.op === 'hello' || msg.op === 'get' || msg.op === 'display') return nvCall({ cmd: msg.op });
   if (msg.op === 'set') {
     const v = L.nvValidatePatch(msg.payload, null);
     return v.ok ? nvCall(Object.assign({ cmd: 'set' }, v.patch)) : Promise.resolve({ ok: false, error: v.error });
@@ -612,6 +934,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     nvHandle(msg).then(sendResponse, (e) => sendResponse(L.nvPortError((e && e.message) || 'error')));
     return true;
   }
+
+  if (msg.type === 'hdr-only' && msg.op === 'drop' && fromExtensionPage(sender)) {
+    hoDrop().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false }));
+    return true;
+  }
   return false;
 });
 
@@ -631,20 +958,23 @@ async function injectOpenTabs() {
     if (!validTabId(t.id) || t.discarded) return null;
     return call(() => chrome.scripting.executeScript({
       target: { tabId: t.id, allFrames: true },
-      files: ['lib.js', 'content.js']
+      files: ['i18n.js', 'lib.js', 'content.js']
     })).catch(noop);
   }));
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
-  initSettings().catch(noop).then(nvScheduleCheck);
+  initSettings().catch(noop).then(nvScheduleCheck).then(() => onBrowserStart()).catch(noop);
   const reason = details && details.reason;
   if (reason === 'install' || reason === 'update') injectOpenTabs().catch(noop);
 });
 
 // ---------- tab 生命周期 ----------
 
-chrome.tabs.onRemoved.addListener((tabId) => forgetTab(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  forgetTab(tabId);
+  if (settingsCache && settingsCache.hdrOnly) hoSchedule();
+});
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => forgetTab(removedTabId));
 

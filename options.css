@@ -1,0 +1,95 @@
+/* RTX HDR 开关 —— 选项页（备份），和弹窗同一套 C 风格 */
+
+:root {
+  --ink: #0A0A0A;
+  --paper: #FAFAFA;
+  --muted: #4A4A4A;
+  --rule: #0A0A0A;
+  --bar: #0A0A0A;
+  --bar-fg: #FAFAFA;
+  --warn: #A33A00;
+  --accent: #A98BFF;
+  --on-accent: #0A0A0A;
+  --accent-fg: #A98BFF;
+  --f-cjk: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --f-ui: "Archivo", var(--f-cjk);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #F2F2F2;
+    --paper: #111111;
+    --muted: #A3A3A3;
+    --rule: #3A3A3A;
+    --bar: #000000;
+    --warn: #FFB37A;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+[hidden] { display: none !important; }
+
+body { min-height: 100vh; background: var(--paper); color: var(--ink); font: 15px/1.6 var(--f-ui); }
+
+:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+.top { display: flex; align-items: center; height: 56px; padding: 0 24px; background: var(--bar); color: var(--bar-fg); }
+
+.brand { display: flex; align-items: center; gap: 10px; }
+
+.top h1 { margin: 0; font: 900 17px/1.2 var(--f-cjk); }
+
+.logo { width: 26px; height: 26px; }
+.logo-bg { fill: #0A0A0A; stroke: #3A3A3A; stroke-width: 6; }
+.logo-screen { fill: none; stroke: #FAFAFA; stroke-width: 10; }
+.logo-lit { fill: #FAFAFA; }
+.logo-bar { fill: var(--accent); }
+
+.wrap { max-width: 640px; margin: 0 auto; padding: 28px 16px 64px; display: flex; flex-direction: column; gap: 20px; }
+
+.lead { margin: 0; color: var(--muted); }
+
+.card { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 20px; border: 2px solid var(--rule); }
+
+.card h2 { margin: 0; font: 900 18px/1.3 var(--f-cjk); }
+
+.card p { margin: 0; }
+
+.btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 700 15px var(--f-cjk);
+  cursor: pointer;
+}
+
+.btn.accent { background: var(--accent); color: var(--on-accent); border-color: var(--ink); }
+
+.btn:disabled { opacity: .45; cursor: default; }
+
+.file input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+
+.file:focus-within { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+.preview { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-top: 6px; }
+
+.strong { font-weight: 800; }
+
+.muted { color: var(--muted); font-size: 13px; }
+
+.msg { font-weight: 700; }
+
+.msg:empty { display: none; }
+
+.msg.warn { color: var(--warn); }

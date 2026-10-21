@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>icon-draw self-test</title>
+<!--
+  icon-draw.js 自测 + 各主题色预览。
+  打开方式（任选其一）：
+    1. 扩展已按「加载已解压的扩展程序」装好时：chrome-extension://<扩展ID>/tools/icon-draw-test.html
+    2. 在仓库根目录 python -m http.server 8765 --bind 127.0.0.1，再打开 http://127.0.0.1:8765/tools/icon-draw-test.html
+    3. 无头运行（不弹窗口），配合第 2 种的本地服务：
+       chrome --headless=new --user-data-dir=<临时目录> --virtual-time-budget=10000 --dump-dom http://127.0.0.1:8765/tools/icon-draw-test.html
+  结果在 #result 第一行（也写进标题）：PASS / FAIL。直接双击用 file:// 打开也能跑，但与 icons/*.png 的逐像素比较
+  和 Worker（importScripts）检查会被跳过。
+-->
+<style>
+  body { margin: 16px; background: #fff; color: #111; font: 13px/1.5 system-ui, sans-serif; }
+  pre { padding: 8px 12px; border-radius: 6px; background: #f4f4f4; white-space: pre-wrap; }
+  pre.pass { background: #e7f6e9; }
+  pre.fail { background: #fdeaea; }
+  .row { display: flex; align-items: center; gap: 14px; padding: 10px 14px; }
+  canvas.zoom { image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<pre id="result">running…</pre>
+<div id="preview"></div>
+<script src="../icon-draw.js"></script>
+<script src="icon-draw-test.js"></script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+{
+  "extName": {
+    "message": "RTX HDR 开关",
+    "description": "扩展名称"
+  },
+  "extDescription": {
+    "message": "按视频开关 NVIDIA RTX 视频 HDR：快捷键、记住选择、自动识别白底视频、NVIDIA 参数与预设、SDR 亮度同步、夜间护眼与连续观看提醒。",
+    "description": "扩展说明"
+  },
+  "actionTitle": {
+    "message": "RTX HDR 开关",
+    "description": "工具栏按钮提示"
+  },
+  "cmdToggleHdr": {
+    "message": "切换当前视频的 RTX HDR",
+    "description": "快捷键"
+  },
+  "cmdToggleAuto": {
+    "message": "开/关 自动检测白底视频",
+    "description": "快捷键"
+  },
+  "cmdMgUp": {
+    "message": "NVIDIA 中间灰 +5",
+    "description": "快捷键"
+  },
+  "cmdMgDown": {
+    "message": "NVIDIA 中间灰 −5",
+    "description": "快捷键"
+  },
+  "cmdForgetVideo": {
+    "message": "清除当前视频的记忆",
+    "description": "快捷键"
+  },
+  "cmdNextPreset": {
+    "message": "切换到下一个 NVIDIA 预设",
+    "description": "快捷键"
+  }
+}

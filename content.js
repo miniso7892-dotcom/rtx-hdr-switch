@@ -47,13 +47,18 @@
   // 这些元素的子节点不会被渲染，全屏时不能把 OSD 挂进去
   const NO_CHILD_RENDER = new Set(['video', 'audio', 'iframe', 'frame', 'canvas', 'img', 'embed', 'object',
     'input', 'textarea', 'select', 'picture']);
+  // 屏幕提示：C 风格的黑底白字方块，左边一个主题色小方块（放在 closed shadow root 里）
   const OSD_CSS = 'all:initial !important;position:fixed !important;z-index:2147483647 !important;' +
     'pointer-events:none !important;display:block !important;box-sizing:border-box !important;' +
-    'margin:0 !important;padding:6px 12px !important;' +
-    'border-radius:6px !important;background:rgba(18,18,18,.82) !important;color:#fff !important;' +
-    'font:600 14px/1.45 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif !important;' +
+    'margin:0 !important;padding:7px 12px !important;' +
+    'border-radius:0 !important;background:rgba(10,10,10,.9) !important;color:#FAFAFA !important;' +
+    'font:700 14px/1.45 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif !important;' +
     'letter-spacing:.02em !important;overflow:hidden !important;' +
-    'box-shadow:0 2px 10px rgba(0,0,0,.35) !important;transition:opacity .35s ease !important;';
+    'box-shadow:0 0 0 2px rgba(250,250,250,.14),0 4px 14px rgba(0,0,0,.4) !important;transition:opacity .35s ease !important;';
+  const OSD_INNER_CSS = ':host{all:initial}.m{display:inline-block;width:9px;height:9px;margin:0 9px 1px 0;vertical-align:middle}' +
+    '.t{font:inherit;color:inherit}';
+  // background 写的「只关 HDR」状态：{active: 用全局开关代替逐视频滤镜, leased, error?}
+  const HDR_ONLY_KEY = 'hdrOnlyStatus';
 
   const isTop = (() => { try { return window.top === window; } catch (e) { return false; } })();
   const openOrClosedShadowRoot = (() => {
@@ -65,9 +70,14 @@
 
   let settings = L.mergeSettings(null);
   let settingsReady = false;
+  let uiLanguage = '';
+  try { uiLanguage = chrome.i18n.getUILanguage(); } catch (e) { uiLanguage = navigator.language || ''; }
+  let lang = 'zh';
+  let hdrOnly = false; // 「只关 HDR」模式生效中：想关的视频不加滤镜，由 background 关掉全局 HDR
   let settingsTouched = false;
   let eyeRestAt = 0; // 护眼 SDR 开始的时间（0 = 没有）
   let eyeRestTouched = false;
+  let hdrOnlyTouched = false;
   let destroyed = false;
   let quietNext = false;
 
@@ -100,7 +110,8 @@
   let lastReportAt = 0;
   let everReported = false;
   let osdEl = null;
-  let osdText = null; // 放文字的 closed shadow root（不支持时就是 osdEl 本身）
+  let osdText = null; // 放文字的节点（closed shadow root 里的 span；不支持 shadow root 时就是 osdEl 本身）
+  let osdMark = null;
   let osdHideTimer = 0;
   let osdRemoveTimer = 0;
 
@@ -116,6 +127,11 @@
 
   function storageCall(fn) {
     try { return Promise.resolve(fn()).catch(noop); } catch (e) { return Promise.resolve(); }
+  }
+
+  function updateLang() {
+    const i18n = globalThis.RtxHdrI18n;
+    lang = i18n ? i18n.resolve(settings.ui.lang, uiLanguage) : 'zh';
   }
 
   function infoOf(v) {
@@ -358,10 +374,12 @@
     return L.isOffFilter(style.getPropertyValue('filter')) && style.getPropertyPriority('filter') === 'important';
   }
 
-  function applyState(v, state) {
+  function applyState(v, want) {
     const st = v.style;
     const ds = v.dataset;
     if (!st || !ds) return;
+    // 「只关 HDR」模式：视频仍走 overlay（超分保留），HDR 由 background 关掉全局开关来关
+    const state = want === 'off' && hdrOnly ? 'on' : want;
     if (state === 'off') {
       if (!isOurs(st)) {
         const orig = st.getPropertyValue('filter');
@@ -417,7 +435,7 @@
     scheduleEvaluate();
     if (v === primary && !info.contestNotified) {
       info.contestNotified = true;
-      showOsd('页面在不断改写视频样式，无法关闭 HDR', OSD_MS, v, false);
+      showOsd(L.t(lang, 'content.contested'), OSD_MS, v, false);
     }
   }
 
@@ -558,7 +576,7 @@
       info.decisionKey = key;
       info.eff = eff;
       if (v === primary && !quiet && !drm && !info.contested && prevEff && prevEff !== eff) {
-        showOsd(L.osdText(eff, d.reason), OSD_MS, v, false);
+        showOsd(L.osdText(eff, d.reason, lang), OSD_MS, v, false);
       }
     }
     updateSampler();
@@ -672,8 +690,21 @@
     if (!osdEl) {
       osdEl = document.createElement('rtx-hdr-osd');
       // 文字放进 closed shadow root：页面脚本读不到提示内容（预设名、错误详情等）
-      try { osdText = osdEl.attachShadow({ mode: 'closed' }); } catch (e) { osdText = osdEl; }
+      try {
+        const sr = osdEl.attachShadow({ mode: 'closed' });
+        const style = document.createElement('style');
+        style.textContent = OSD_INNER_CSS;
+        osdMark = document.createElement('span');
+        osdMark.className = 'm';
+        osdText = document.createElement('span');
+        osdText.className = 't';
+        sr.append(style, osdMark, osdText);
+      } catch (e) {
+        osdText = osdEl;
+        osdMark = null;
+      }
     }
+    if (osdMark) osdMark.style.background = settings.ui.accent;
     const parent = osdParent() || root;
     const vw = window.innerWidth;
     let left = 16;
@@ -729,18 +760,18 @@
     }
     if (settings.rememberManual && key) saveRule(key, state);
     evaluate(true);
-    showOsd(L.osdText(state, 'manual'), OSD_MS, v, false);
+    showOsd(L.osdText(state, 'manual', lang), OSD_MS, v, false);
   }
 
   // 返回可以手动控制的主视频；没有时给出提示
   function controllablePrimary() {
     evaluate(true);
     if (!primary) {
-      showOsd('当前页面没有可控制的视频', OSD_MS, null, false);
+      showOsd(L.t(lang, 'content.noVideo'), OSD_MS, null, false);
       return null;
     }
     if (primary.mediaKeys) {
-      showOsd('受版权保护的视频无法控制', OSD_MS, primary, false);
+      showOsd(L.t(lang, 'content.drm'), OSD_MS, primary, false);
       return null;
     }
     return primary;
@@ -777,8 +808,9 @@
       settingsTouched = true;
       settingsReady = true;
       evaluate(true);
-      showOsd(next.autoDetect === 'off' ? '自动检测白底视频：关'
-        : '自动检测白底视频：开（' + L.AUTO_MODE_TEXT[next.autoDetect] + '）', OSD_MS, primary, false);
+      updateLang();
+      showOsd(next.autoDetect === 'off' ? L.t(lang, 'content.autoOff')
+        : L.t(lang, 'content.autoOn', { mode: L.autoModeText(next.autoDetect, lang) }), OSD_MS, primary, false);
     });
   }
 
@@ -798,7 +830,7 @@
       }
     }
     evaluate(true);
-    showOsd(primary ? '已清除此视频的记忆' : '当前页面没有可控制的视频', OSD_MS, primary, false);
+    showOsd(L.t(lang, primary ? 'content.forgot' : 'content.noVideo'), OSD_MS, primary, false);
   }
 
   function saveRule(key, state) {
@@ -837,7 +869,7 @@
   const onReply = guard(function (res) {
     if (!res || !res.remind) return;
     const m = res.remind;
-    showOsd(L.eyeReminderText(m.minutes, !!m.autoOff, typeof m.shortcut === 'string' ? m.shortcut : ''),
+    showOsd(L.eyeReminderText(m.minutes, !!m.autoOff, typeof m.shortcut === 'string' ? m.shortcut : '', lang),
       EYE_OSD_MS, primary, true);
   });
 
@@ -920,7 +952,8 @@
     const saved = savedRules.get(r.key);
     r.type = 'state';
     r.ok = true;
-    r.reasonText = L.reasonText(r.reason);
+    r.reasonText = L.reasonText(r.reason, lang);
+    r.hdrOnly = hdrOnly;
     r.topHostname = topHostname;
     r.isTop = isTop;
     r.settingsReady = settingsReady;
@@ -963,7 +996,18 @@
     if (changes.settings) {
       settings = L.mergeSettings(changes.settings.newValue);
       settingsTouched = true;
+      updateLang();
       dirty = true;
+    }
+    if (changes[HDR_ONLY_KEY]) {
+      const v = changes[HDR_ONLY_KEY].newValue;
+      const next = !!(v && v.active);
+      hdrOnlyTouched = true;
+      if (next !== hdrOnly) {
+        hdrOnly = next;
+        quietNext = true; // 视频该开该关没变，只是换了关的方法
+        dirty = true;
+      }
     }
     if (changes[L.EYE_REST_KEY]) {
       eyeRestAt = L.eyeRestAt(changes[L.EYE_REST_KEY].newValue);
@@ -1147,10 +1191,12 @@
     return;
   }
 
-  storageCall(() => chrome.storage.local.get(['settings', L.EYE_REST_KEY]).then((r) => {
+  storageCall(() => chrome.storage.local.get(['settings', L.EYE_REST_KEY, HDR_ONLY_KEY]).then((r) => {
     // onChanged 先到的话以它为准
     if (!settingsTouched) settings = L.mergeSettings(r && r.settings);
     if (!eyeRestTouched) eyeRestAt = L.eyeRestAt(r && r[L.EYE_REST_KEY]);
+    if (!hdrOnlyTouched) hdrOnly = !!(r && r[HDR_ONLY_KEY] && r[HDR_ONLY_KEY].active);
+    updateLang();
   })).then(() => {
     settingsReady = true;
     scheduleEvaluate();
