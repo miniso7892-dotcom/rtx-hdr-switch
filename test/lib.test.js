@@ -89,6 +89,39 @@ test('videoKey: 兜底去掉跟踪参数并排序', () => {
   assert.ok(L.videoKey('about:blank').startsWith('u:about:'));
 });
 
+// ---------- 控制栏按钮的网站 ----------
+
+test('playerSite: 有控制栏按钮的网站（按 frame 自己的完整域名）', () => {
+  assert.equal(L.playerSite('www.bilibili.com', '/video/BV1GJ411x7h7/'), 'bilibili');
+  assert.equal(L.playerSite('www.bilibili.com', '/bangumi/play/ep123456'), 'bilibili');
+  assert.equal(L.playerSite('www.bilibili.com', '/list/watchlater'), 'bilibili');
+  assert.equal(L.playerSite('www.bilibili.com', '/festival/2026bnj'), 'bilibili');
+  assert.equal(L.playerSite('bilibili.com'), 'bilibili');
+  assert.equal(L.playerSite('player.bilibili.com', '/player.html'), 'bilibili', '嵌入播放器');
+  assert.equal(L.playerSite(' WWW.BiliBili.COM. ', '/video/x'), 'bilibili', '大小写、末尾的点');
+  assert.equal(L.playerSite('www.youtube.com', '/watch'), 'youtube');
+  assert.equal(L.playerSite('www.youtube.com', '/'), 'youtube', '首页（小窗里的播放器）');
+  assert.equal(L.playerSite('youtube.com'), 'youtube');
+  assert.equal(L.playerSite('www.twitch.tv', '/somechannel'), 'twitch');
+  assert.equal(L.playerSite('twitch.tv', '/videos/1'), 'twitch');
+  assert.equal(L.playerSite('v.qq.com', '/x/cover/mzc00200abc/x0045xyz.html'), 'tencent');
+});
+
+test('playerSite: 嵌入播放器、直播、其他网站不加按钮', () => {
+  assert.equal(L.playerSite('www.youtube.com', '/embed/dQw4w9WgXcQ'), null);
+  assert.equal(L.playerSite('www.youtube.com', '/EMBED/x'), null);
+  assert.equal(L.playerSite('www.youtube.com', '/embed'), null);
+  assert.equal(L.playerSite('www.youtube.com', '/embedded-page'), 'youtube', '只排除 /embed/ 这一段');
+  for (const h of ['www.youtube-nocookie.com', 'm.youtube.com', 'music.youtube.com', 'live.bilibili.com', 'm.bilibili.com',
+    'space.bilibili.com', 'www.iqiyi.com', 'm.v.qq.com', 'player.twitch.tv', 'clips.twitch.tv', 'example.com', '', null, undefined]) {
+    assert.equal(L.playerSite(h, '/'), null, String(h));
+  }
+  // 只认完整域名，不按后缀或子串
+  assert.equal(L.playerSite('www.bilibili.com.evil.example'), null);
+  assert.equal(L.playerSite('evil-youtube.com'), null);
+  assert.equal(L.playerSite('notv.qq.com'), null);
+});
+
 // ---------- decide ----------
 
 const S = (patch) => L.mergeSettings(Object.assign({}, patch));

@@ -425,6 +425,20 @@
     return null;
   }
 
+  // 播放器控制栏里加 HDR 按钮的网站：按视频所在 frame 自己的域名判断（完整域名，不按后缀），
+  // 路径只用来排除 YouTube 嵌入播放器（/embed/ 是另一套控制栏）。
+  // 返回 'bilibili' | 'youtube' | 'twitch' | 'tencent'；其他网站（含 B 站直播、爱奇艺）返回 null
+  function playerSite(hostname, pathname) {
+    const h = String(hostname == null ? '' : hostname).trim().toLowerCase().replace(/\.$/, '');
+    if (h === 'www.bilibili.com' || h === 'bilibili.com' || h === 'player.bilibili.com') return 'bilibili';
+    if (h === 'www.youtube.com' || h === 'youtube.com') {
+      return /^\/embed(?:\/|$)/i.test(String(pathname == null ? '' : pathname)) ? null : 'youtube';
+    }
+    if (h === 'www.twitch.tv' || h === 'twitch.tv') return 'twitch';
+    if (h === 'v.qq.com') return 'tencent';
+    return null;
+  }
+
   function videoKey(url) {
     let u;
     try { u = new URL(String(url)); } catch (e) { return 'u:' + String(url == null ? '' : url); }
@@ -1112,6 +1126,7 @@
     mergeSettings: mergeSettings,
     toggleAutoMode: toggleAutoMode,
     isTrackingParam: isTrackingParam,
+    playerSite: playerSite,
     videoKey: videoKey,
     inNightWindow: inNightWindow,
     validRule: validRule,

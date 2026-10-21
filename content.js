@@ -219,6 +219,7 @@
     const href = location.href;
     if (href === lastHref) return;
     lastHref = href;
+    btnSite = L.playerSite(location.hostname, location.pathname) || '';
     const url = effectiveUrl();
     hostname = L.hostOf(url);
     topHostname = computeTopHost(hostname);
@@ -345,6 +346,8 @@
   }
 
   function onDomMutations(records) {
+    // 控制栏被网站重建、按钮跟着没了：下一帧重新放（只看一次 isConnected，不另外观察）
+    if (pbtn && !btnRaf && !pbtn.el.isConnected) btnRaf = requestAnimationFrame(onBtnLost);
     let removed = false;
     for (let r = 0; r < records.length; r++) {
       const rec = records[r];
@@ -355,7 +358,7 @@
         if (n.nodeType !== 1) continue;
         if (n.localName === 'video') {
           register(n);
-        } else if (n.firstElementChild) {
+        } else if (n.firstElementChild && !isOwnNode(n)) { // 我们自己插入的按钮、提示里没有视频
           const list = n.getElementsByTagName('video');
           for (let j = 0; j < list.length; j++) register(list[j]);
         }
@@ -581,6 +584,7 @@
     }
     updateSampler();
     report(false);
+    syncButton();
   }
 
   // ---------- 自动检测采样 ----------
@@ -778,13 +782,19 @@
   }
 
   function toggleHdr() {
-    const v = controllablePrimary();
+    toggleVideo(controllablePrimary());
+  }
+
+  // 手动切换一个视频（快捷键对主视频，控制栏按钮对它所在播放器的视频）
+  function toggleVideo(v) {
     if (!v) return;
+    setManual(v, effState(v) === 'on' ? 'off' : 'on');
+  }
+
+  // 以实际生效的状态为准（被页面改回时显示的是开，再按一次是「关」）；还没决策过时看 data-rtxhdr
+  function effState(v) {
     const info = infoOf(v);
-    // 以实际生效的状态为准（被页面改回时显示的是开，再按一次是「关」）
-    const cur = info.decisionKey === keyOf(info) && info.eff ? info.eff
-      : v.dataset.rtxhdr === 'off' ? 'off' : 'on';
-    setManual(v, cur === 'on' ? 'off' : 'on');
+    return info.decisionKey === keyOf(info) && info.eff ? info.eff : v.dataset.rtxhdr === 'off' ? 'off' : 'on';
   }
 
   function setState(state) {
@@ -852,6 +862,508 @@
       if (old.length) await local.remove(old);
     });
   }
+
+  // ---------- 播放器控制栏按钮 ----------
+
+  // 各网站的控制栏（选择器只写在这里）：
+  //   root：从主视频往上找到的播放器；skip：不加按钮的播放器（悬停预览）
+  //   bars：控制栏右侧，依次取第一个找得到的；before：插在控制栏里含有它的那个子元素前面，依次找，
+  //   都没有时 append 为真就加在最后，否则当作控制栏还没好
+  //   make：照网站原生按钮的结构造按钮（大小、悬停、全屏变大、焦点框都用网站自己的 CSS）
+  const PLAYER_BARS = Object.freeze({
+    bilibili: {
+      root: '.bpx-player-container',
+      skip: '.v-recommend-inline-player',
+      bars: ['.bpx-player-control-bottom-right'],
+      before: ['.bpx-player-ctrl-setting', '.bpx-player-ctrl-pip', '.bpx-player-ctrl-full'],
+      append: true,
+      make: makeBiliButton
+    },
+    youtube: {
+      root: '#movie_player',
+      skip: '#inline-preview-player',
+      // 新版（delhi）右侧分左右两组，放进左组（和字幕、设置同一个圆角框）；旧版直接在 .ytp-right-controls 里
+      bars: ['.ytp-chrome-bottom .ytp-right-controls-left', '.ytp-chrome-bottom .ytp-right-controls'],
+      before: ['.ytp-subtitles-button', '.ytp-settings-button'],
+      append: true,
+      make: makeYtButton
+    },
+    twitch: {
+      root: '.video-player',
+      bars: ['.player-controls__right-control-group'],
+      // class 名每次构建都会变：插在包着设置按钮的那一层前面，结构和 class 运行时照设置按钮抄
+      before: ['[data-a-target="player-settings-button"]'],
+      append: false,
+      make: makeTwitchButton
+    },
+    tencent: {
+      root: '#player-component, .txp_player',
+      bars: ['.txp_right_controls'],
+      before: ['.txp_btn_pip', '.txp_btn_fake', '.txp_btn_fullscreen'],
+      append: true,
+      make: makeTxpButton
+    }
+  });
+  // 按钮、提示、样式都带这个 class 和 data-rtxhdr-owner=实例标记：新实例清掉旧实例留下的
+  const BTN_CLASS = 'rtxhdr-player-btn';
+  const BTN_RETRY_MS = 500;
+  const BTN_WAIT_MS = 15000;
+  const BTN_APPEND_MS = 3000;
+  // 网站不停删掉我们的按钮时别跟它较劲：10 秒内重插超过 8 次就停手，等下一次导航或换主视频
+  const BTN_INSERT_WINDOW_MS = 10000;
+  const BTN_INSERT_MAX = 8;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  // 图标画在 24×24 上：圆角矩形徽标里的 H、D、R 都是路径（不用字体）
+  const ICON_LETTERS = 'M4.75 8V16M7.85 8V16M4.75 12H7.85' +
+    'M10.45 8.75H11.3A2.25 2.25 0 0 1 13.55 11V13A2.25 2.25 0 0 1 11.3 15.25H10.45Z' +
+    'M16.15 16V8.75H17.5A1.75 1.75 0 0 1 17.5 12.25H16.15M17.9 12.25L19.25 16';
+  const ICON_SLASH = 'M3 3L21 21';
+  const LETTER_CSS = 'fill:none;stroke-width:1.5;stroke-linecap:butt;stroke-linejoin:miter;stroke:';
+  // 自己画的提示（原生提示不管插进来的按钮）。B 站照它自己的提示；YouTube 照它的提示大小，
+  // 但不用 backdrop-filter（盖在视频上会让视频离开 overlay，RTX HDR 跟着失效）
+  const TIP_CSS = 'position:absolute;display:none;z-index:12000;pointer-events:none;box-sizing:border-box;' +
+    'width:max-content;margin:0;text-align:left;white-space:normal;overflow-wrap:break-word;word-break:normal;' +
+    'cursor:default;user-select:none;opacity:1;transform:none;text-shadow:none;';
+  const TIP_CSS_BILI = TIP_CSS + 'max-width:18em;padding:6px 8px;border-radius:2px;' +
+    'background-color:var(--bpx-tooltip-bgcolor,#000);color:var(--bpx-tooltip-color,#fff);' +
+    'font-size:12px;font-weight:400;line-height:1.5;';
+  const TIP_CSS_YT = TIP_CSS + 'z-index:1003;max-width:300px;padding:5px 9px;' +
+    'background-color:rgba(28,28,28,.9);color:#eee;font-size:118%;font-weight:500;line-height:15px;';
+
+  let btnSite = '';    // 本 frame 的网站（L.playerSite）；空 = 不加按钮
+  let pbtn = null;     // 当前按钮：{el 插进控制栏的元素, btn 可点的元素, icon, dim, tip, tipHost, txpTip, bar, root, video, site, sig, tipOn}
+  let btnWait = null;  // 控制栏还没出现：{video, href, since, until}；until 为 -1 表示已放弃，等导航或换主视频
+  let btnRetryTimer = 0;
+  let btnRaf = 0;
+  let btnInserts = [];
+  let btnStyle = null;
+  let btnSeq = 0;
+  let btnSpace = false;
+
+  // evaluate() 末尾调用：主视频所在播放器的控制栏里放一个按钮，状态跟着这个视频走
+  function syncButtonNow() {
+    const site = btnSite && settings.playerButton ? PLAYER_BARS[btnSite] : null;
+    if (!site) {
+      if (pbtn || btnStyle) {
+        removeButton();
+        removeBtnStyle();
+      }
+      return;
+    }
+    const v = primary && primary.isConnected ? primary : null;
+    const root = v && !(site.skip && v.closest(site.skip)) ? v.closest(site.root) : null;
+    if (!root) {
+      // 主视频不在支持的播放器里（悬停预览、没有可见的视频）：已有的按钮还在原处就留着
+      if (pbtn && !buttonPlaced()) removeButton();
+      else renderButton();
+      return;
+    }
+    if (pbtn && buttonPlaced() && root.contains(pbtn.bar)) {
+      pbtn.video = v;
+      keepInPlace(site);
+      renderButton();
+      return;
+    }
+    placeButton(site, v, root);
+  }
+  const syncButton = guard(syncButtonNow);
+
+  // 网站后来才把原生按钮填进控制栏、或者调整了顺序：挪回最合适的那个锚点前面
+  function keepInPlace(site) {
+    const p = pbtn;
+    const anchor = anchorIn(p.bar, site.before);
+    if (!anchor || p.el.nextElementSibling === anchor || !insertAllowed()) return;
+    p.bar.insertBefore(p.el, anchor);
+  }
+
+  function buttonPlaced() {
+    return pbtn.el.parentNode === pbtn.bar && pbtn.bar.isConnected;
+  }
+
+  function isOwnNode(n) {
+    const c = n.classList;
+    return !!c && (c.contains(BTN_CLASS) || c.contains(BTN_CLASS + '-tip'));
+  }
+
+  function placeButton(site, v, root) {
+    const href = location.href;
+    if (btnWait && btnWait.video === v && btnWait.href === href && btnWait.until < 0) return;
+    let bar = null;
+    for (let i = 0; i < site.bars.length && !bar; i++) bar = root.querySelector(site.bars[i]);
+    const anchor = bar ? anchorIn(bar, site.before) : null;
+    // 控制栏可能还空着、正在填充（B 站实测）：先等锚点出现，等了 BTN_APPEND_MS 还没有（网站改版）才加在最后
+    if (!bar || (!anchor && (!site.append || !waitedFor(v, href, BTN_APPEND_MS)))) {
+      waitForBar(v, href);
+      return;
+    }
+    removeButton();
+    if (!insertAllowed()) {
+      btnWait = { video: v, href: href, since: Date.now(), until: -1 };
+      return;
+    }
+    removeStaleButtons();
+    const made = site.make(bar, anchor, root);
+    if (!made) {
+      waitForBar(v, href);
+      return;
+    }
+    const el = made.el;
+    const b = made.btn;
+    el.classList.add(BTN_CLASS);
+    el.setAttribute('data-rtxhdr-owner', TOKEN);
+    b.addEventListener('mousedown', onBtnMouseDown);
+    b.addEventListener('click', onBtnClick);
+    b.addEventListener('keydown', onBtnKeyDown);
+    b.addEventListener('keyup', onBtnKeyUp);
+    if (made.tip) {
+      made.tip.className = BTN_CLASS + '-tip';
+      made.tip.setAttribute('data-rtxhdr-owner', TOKEN);
+      made.tip.setAttribute('aria-hidden', 'true');
+      b.addEventListener('mouseenter', onBtnEnter);
+      b.addEventListener('mouseleave', onBtnLeave);
+      b.addEventListener('focus', onBtnFocus);
+      b.addEventListener('blur', onBtnLeave);
+    }
+    bar.insertBefore(el, anchor);
+    pbtn = Object.assign(made, { bar: bar, root: root, video: v, site: btnSite, sig: '', tipOn: false });
+    btnWait = null;
+    ensureBtnStyle();
+    renderButton();
+  }
+
+  // 控制栏里含有 sels 之一的那个直接子元素
+  function anchorIn(bar, sels) {
+    for (const sel of sels) {
+      let n = bar.querySelector(sel);
+      while (n && n.parentElement !== bar) n = n.parentElement;
+      if (n) return n;
+    }
+    return null;
+  }
+
+  function waitedFor(v, href, ms) {
+    return !!btnWait && btnWait.video === v && btnWait.href === href && btnWait.until > 0 && Date.now() - btnWait.since >= ms;
+  }
+
+  // 控制栏还没出现（播放器晚于视频渲染）：每 500 ms 再找一次，15 秒后放弃，等下一次导航或换主视频
+  function waitForBar(v, href) {
+    const now = Date.now();
+    if (!btnWait || btnWait.video !== v || btnWait.href !== href) btnWait = { video: v, href: href, since: now, until: now + BTN_WAIT_MS };
+    if (btnWait.until < 0) return;
+    if (now >= btnWait.until) {
+      btnWait.until = -1;
+      return;
+    }
+    if (!btnRetryTimer) btnRetryTimer = setTimeout(retryButton, BTN_RETRY_MS);
+  }
+
+  const retryButton = guard(function () {
+    btnRetryTimer = 0;
+    scheduleEvaluate();
+  });
+
+  function insertAllowed() {
+    const now = Date.now();
+    btnInserts = btnInserts.filter((t) => now - t < BTN_INSERT_WINDOW_MS);
+    if (btnInserts.length >= BTN_INSERT_MAX) return false;
+    btnInserts.push(now);
+    return true;
+  }
+
+  // SPA 导航、播放器重建、往返缓存恢复：重新找控制栏（之前 15 秒没找到的也重新等）
+  function kickButton() {
+    btnWait = null;
+    btnInserts = [];
+    if (btnSite || pbtn) scheduleEvaluate();
+  }
+
+  function removeButton() {
+    clearTimeout(btnRetryTimer);
+    btnRetryTimer = 0;
+    const p = pbtn;
+    if (!p) return;
+    pbtn = null;
+    try { p.el.remove(); } catch (e) { /* ignore */ }
+    if (p.tip) { try { p.tip.remove(); } catch (e) { /* ignore */ } }
+  }
+
+  // 扩展重新加载后旧实例留下的按钮、提示和样式（旧实例失效前没来得及删的）
+  function removeStaleButtons() {
+    let list = null;
+    try { list = document.querySelectorAll('.' + BTN_CLASS + ',.' + BTN_CLASS + '-tip,.' + BTN_CLASS + '-style'); } catch (e) { return; }
+    for (let i = 0; i < list.length; i++) {
+      const el = list[i];
+      if (el.getAttribute('data-rtxhdr-owner') !== TOKEN) { try { el.remove(); } catch (e) { /* ignore */ } }
+    }
+  }
+
+  // B 站小窗（data-screen="mini"）不显示按钮：用一条样式规则，切换时立即生效
+  function ensureBtnStyle() {
+    if (btnSite !== 'bilibili' || (btnStyle && btnStyle.isConnected)) return;
+    const el = document.createElement('style');
+    el.className = BTN_CLASS + '-style';
+    el.setAttribute('data-rtxhdr-owner', TOKEN);
+    el.textContent = '.bpx-player-container[data-screen="mini"] .' + BTN_CLASS + '{display:none !important}';
+    (document.head || document.documentElement).appendChild(el);
+    btnStyle = el;
+  }
+
+  function removeBtnStyle() {
+    if (!btnStyle) return;
+    try { btnStyle.remove(); } catch (e) { /* ignore */ }
+    btnStyle = null;
+  }
+
+  // 状态、文字只在变化时写 DOM（evaluate 每秒都会调到这里）
+  function renderButton() {
+    const p = pbtn;
+    if (!p) return;
+    const v = p.video;
+    const drm = !!(v && v.mediaKeys);
+    const state = v ? effState(v) : 'on';
+    const sig = (drm ? 'drm' : state) + '|' + lang;
+    if (sig === p.sig) return;
+    p.sig = sig;
+    const b = p.btn;
+    const sdr = !drm && state === 'off';
+    const text = drm ? L.t(lang, 'player.drm') : sdr ? L.t(lang, 'player.off') : L.t(lang, 'player.on');
+    b.setAttribute('aria-label', text);
+    if (drm) {
+      // 受版权保护：CSS 管不了这个视频，按钮变暗、点了没反应
+      b.setAttribute('aria-disabled', 'true');
+      b.removeAttribute('aria-pressed');
+    } else {
+      b.removeAttribute('aria-disabled');
+      b.setAttribute('aria-pressed', sdr ? 'false' : 'true');
+    }
+    p.icon.on.style.display = sdr ? 'none' : '';
+    p.icon.off.style.display = sdr ? '' : 'none';
+    if (p.dim) {
+      p.dim.style.opacity = drm ? '0.4' : '';
+      p.dim.style.cursor = drm ? 'default' : '';
+    }
+    if (p.tip) {
+      p.tip.textContent = text;
+      if (p.tipOn) placeTip(p);
+    } else if (p.txpTip) {
+      p.txpTip.textContent = text;
+    } else {
+      b.title = text;
+    }
+  }
+
+  // 点按钮 = 对按钮所在播放器的视频按一次 Alt+H；受版权保护时按钮是禁用的，什么都不做
+  function pressButton() {
+    const p = pbtn;
+    const v = p && p.video && p.video.isConnected && videos.has(p.video) ? p.video : null;
+    if (!v) {
+      toggleHdr();
+      return;
+    }
+    if (v.mediaKeys) return;
+    evaluate(true);
+    toggleVideo(v);
+  }
+
+  // 不抢焦点（焦点留在播放器上，网站快捷键照常），也不拦事件传播
+  const onBtnMouseDown = guard(function (e) {
+    if (e.button === 0) e.preventDefault();
+  });
+
+  const onBtnClick = guard(function () {
+    if (btnSpace) return; // 按钮有焦点时的空格是播放器的，不切换
+    pressButton();
+  });
+
+  // 回车 = 点击（<button> 自己的回车点击被取消，避免切两次）；空格留给播放器
+  const onBtnKeyDown = guard(function (e) {
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      btnSpace = true;
+      return;
+    }
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.repeat) pressButton();
+  });
+
+  const onBtnKeyUp = guard(function (e) {
+    if (e.key === ' ' || e.key === 'Spacebar') setTimeout(clearBtnSpace, 0);
+  });
+
+  function clearBtnSpace() {
+    btnSpace = false;
+  }
+
+  const onBtnEnter = guard(function () { showTip(); });
+  const onBtnLeave = guard(function () { hideTip(); });
+  // 只有键盘焦点才显示提示
+  const onBtnFocus = guard(function (e) {
+    let visible = true;
+    try { visible = e.currentTarget.matches(':focus-visible'); } catch (err) { visible = true; }
+    if (visible) showTip();
+  });
+
+  function showTip() {
+    const p = pbtn;
+    if (!p || !p.tip) return;
+    if (p.tip.parentNode !== p.tipHost) p.tipHost.appendChild(p.tip);
+    p.tip.style.display = 'block';
+    p.tipOn = true;
+    placeTip(p);
+  }
+
+  function hideTip() {
+    const p = pbtn;
+    if (!p || !p.tip || !p.tipOn) return;
+    p.tipOn = false;
+    p.tip.style.display = 'none';
+  }
+
+  // 提示在按钮正上方居中，左右不超出播放器；和按钮的距离照原生提示
+  // （B 站普通 19 px、网页全屏 28 px，约为按钮宽度的 0.53；YouTube 22 px，按钮变大时按比例放大）
+  function placeTip(p) {
+    const tip = p.tip;
+    const b = p.btn.getBoundingClientRect();
+    const c = p.root.getBoundingClientRect();
+    const host = tip.offsetParent;
+    const o = host ? host.getBoundingClientRect() : { left: 0, top: 0 };
+    const w = tip.offsetWidth;
+    const h = tip.offsetHeight;
+    const gap = p.site === 'bilibili' ? Math.round(b.width * 0.53) : Math.round(22 * b.height / 40);
+    const x = Math.max(c.left + 4, Math.min(b.left + (b.width - w) / 2, c.right - 4 - w));
+    tip.style.left = Math.round(x - o.left) + 'px';
+    tip.style.top = Math.round(b.top - gap - h - o.top) + 'px';
+  }
+
+  function svgEl(name, css, attrs) {
+    const el = document.createElementNS(SVG_NS, name);
+    if (attrs) for (const k of Object.keys(attrs)) el.setAttribute(k, attrs[k]);
+    // 颜色、线宽都写内联样式：网站给按钮里的 svg / path 设的 fill、stroke 盖不过它
+    if (css) el.style.cssText = css;
+    return el;
+  }
+
+  // 两种状态的图标放在同一个 svg 里：on = 实心徽标、字母镂空；off = 描边徽标加斜杠（斜杠两侧留缝）。
+  // 用 createElementNS 拼（YouTube 页面有 Trusted Types，不用 innerHTML）
+  function makeIcon(width, height, viewBox) {
+    const id = BTN_CLASS + '-' + TOKEN + '-' + (++btnSeq);
+    const svg = svgEl('svg', '', { viewBox: viewBox, focusable: 'false', 'aria-hidden': 'true' });
+    if (width) svg.setAttribute('width', width);
+    if (height) svg.setAttribute('height', height);
+    const box = { x: '1', y: '5', width: '22', height: '14', rx: '3.5' };
+    const area = { maskUnits: 'userSpaceOnUse', x: '-8', y: '-8', width: '40', height: '40' };
+    const mOn = svgEl('mask', '', Object.assign({ id: id + '-on' }, area));
+    mOn.append(svgEl('rect', 'fill:#fff;stroke:none', box), svgEl('path', LETTER_CSS + '#000', { d: ICON_LETTERS }));
+    const mOff = svgEl('mask', '', Object.assign({ id: id + '-off' }, area));
+    mOff.append(svgEl('rect', 'fill:#fff;stroke:none', { x: '-8', y: '-8', width: '40', height: '40' }),
+      svgEl('path', 'fill:none;stroke:#000;stroke-width:4.5;stroke-linecap:round', { d: ICON_SLASH }));
+    const defs = svgEl('defs');
+    defs.append(mOn, mOff);
+    const on = svgEl('rect', 'fill:#fff;stroke:none', Object.assign({ mask: 'url(#' + id + '-on)' }, box));
+    const cut = svgEl('g', '', { mask: 'url(#' + id + '-off)' });
+    cut.append(svgEl('rect', 'fill:none;stroke:#fff;stroke-width:2', { x: '2', y: '6', width: '20', height: '12', rx: '2.5' }),
+      svgEl('path', LETTER_CSS + '#fff', { d: ICON_LETTERS }));
+    const off = svgEl('g');
+    off.append(cut, svgEl('path', 'fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round', { d: ICON_SLASH }));
+    svg.append(defs, on, off);
+    return { svg: svg, on: on, off: off };
+  }
+
+  // 原生图标的 viewBox 比 24 大（YouTube 旧版 36、腾讯 28）时，把 24×24 的图标放在正中，大小和原生图标一致
+  function centeredViewBox(ref) {
+    const m = ref && /^\s*0[\s,]+0[\s,]+([\d.]+)[\s,]+([\d.]+)\s*$/.exec(ref.getAttribute('viewBox') || '');
+    const n = m ? Math.max(+m[1], +m[2]) : 24;
+    if (!(n > 24 && n <= 48)) return '0 0 24 24';
+    const o = (24 - n) / 2;
+    return o + ' ' + o + ' ' + n + ' ' + n;
+  }
+
+  // B 站：div.bpx-player-ctrl-btn[role=button] > .bpx-player-ctrl-btn-icon > span.bpx-common-svg-icon > svg，
+  // 提示放在按钮里（B 站的提示由它自己的脚本统一管理，插进来的按钮没有）
+  function makeBiliButton() {
+    const b = document.createElement('div');
+    b.className = 'bpx-player-ctrl-btn';
+    b.setAttribute('role', 'button');
+    b.tabIndex = 0;
+    const box = document.createElement('div');
+    box.className = 'bpx-player-ctrl-btn-icon';
+    const span = document.createElement('span');
+    span.className = 'bpx-common-svg-icon';
+    const icon = makeIcon('24', '24', '0 0 24 24');
+    icon.svg.style.cssText = 'width:100%;height:100%';
+    span.appendChild(icon.svg);
+    box.appendChild(span);
+    const tip = document.createElement('div');
+    tip.style.cssText = TIP_CSS_BILI;
+    b.append(box, tip);
+    return { el: b, btn: b, icon: icon, dim: box, tip: tip, tipHost: b };
+  }
+
+  // YouTube：<button class="ytp-button">；图标尺寸照设置按钮（新版 24×24，旧版是 36×36 的框）；
+  // 提示挂在 #movie_player 里（全屏时也在全屏元素里）
+  function makeYtButton(bar, anchor, root) {
+    const b = document.createElement('button');
+    b.className = 'ytp-button';
+    b.type = 'button';
+    const ref = root.querySelector('.ytp-settings-button svg');
+    const w = (ref && ref.getAttribute('width')) || '24';
+    const icon = makeIcon(w, (ref && ref.getAttribute('height')) || w, centeredViewBox(ref));
+    b.appendChild(icon.svg);
+    const tip = document.createElement('div');
+    tip.style.cssText = TIP_CSS_YT + 'border-radius:' + (root.classList.contains('ytp-delhi-modern') ? '8px;' : '2px;');
+    return { el: b, btn: b, icon: icon, dim: null, tip: tip, tipHost: root };
+  }
+
+  // Twitch：照设置按钮抄结构和 class：InjectLayout > ScLayoutCssVars > button > ButtonIconFigure > ScSvgWrapper > svg
+  // （和影院模式、全屏按钮的结构一样）；提示用 title（Twitch 的提示是 React 弹层）
+  function makeTwitchButton(bar, anchor) {
+    const ref = anchor && anchor.querySelector('[data-a-target="player-settings-button"]');
+    if (!ref) return null;
+    const refSvg = ref.querySelector('svg');
+    const b = document.createElement('button');
+    b.className = ref.className;
+    b.type = 'button';
+    const icon = makeIcon((refSvg && refSvg.getAttribute('width')) || '24', (refSvg && refSvg.getAttribute('height')) || '24', '0 0 24 24');
+    let inner = icon.svg;
+    for (let n = refSvg && refSvg.parentElement; n && n !== ref && ref.contains(n); n = n.parentElement) {
+      const w = document.createElement('div');
+      w.className = n.className;
+      w.appendChild(inner);
+      inner = w;
+    }
+    b.appendChild(inner);
+    let outer = b;
+    for (let n = ref.parentElement, i = 0; n && n !== anchor && n !== bar && i < 2; n = n.parentElement, i++) {
+      const w = document.createElement('div');
+      w.className = n.className;
+      w.appendChild(outer);
+      outer = w;
+    }
+    return { el: outer, btn: b, icon: icon, dim: icon.svg, tip: null };
+  }
+
+  // 腾讯视频：div.txp_btn > svg.txp_icon + div.txp_tooltip（悬停时由腾讯自己的 CSS 显示提示）
+  function makeTxpButton(bar) {
+    const b = document.createElement('div');
+    b.className = 'txp_btn';
+    b.setAttribute('role', 'button');
+    b.tabIndex = 0;
+    const ref = bar.querySelector('.txp_btn_pip svg, .txp_btn_fake svg, .txp_btn_fullscreen svg');
+    const vb = centeredViewBox(ref);
+    const size = vb.split(' ')[2];
+    const icon = makeIcon(size, size, vb);
+    icon.svg.setAttribute('class', 'txp_icon');
+    const tip = document.createElement('div');
+    tip.className = 'txp_tooltip';
+    b.append(icon.svg, tip);
+    return { el: b, btn: b, icon: icon, dim: icon.svg, tip: null, txpTip: tip };
+  }
+
+  const onBtnLost = guard(function () {
+    btnRaf = 0;
+    if (pbtn && !pbtn.el.isConnected) evaluate(false);
+  });
 
   // ---------- 护眼计时 ----------
 
@@ -1046,7 +1558,10 @@
     heartbeat(now);
   });
 
-  const onNavigate = guard(checkUrl);
+  const onNavigate = guard(function () {
+    checkUrl();
+    kickButton();
+  });
   const onDomReady = guard(function () {
     fullScan();
     scheduleEvaluate();
@@ -1060,8 +1575,12 @@
     evaluate(false);
     if (primary) report(true);
   });
-  const onFullscreen = guard(function () { evaluate(false); });
+  const onFullscreen = guard(function () {
+    hideTip();
+    evaluate(false);
+  });
   const onPageShow = guard(function (e) {
+    kickButton();
     if (!e.persisted) return;
     lastSig = '';
     evaluate(false);
@@ -1123,6 +1642,9 @@
     clearTimeout(evalTimer);
     clearTimeout(osdHideTimer);
     clearTimeout(osdRemoveTimer);
+    if (btnRaf) { try { cancelAnimationFrame(btnRaf); } catch (e) { /* ignore */ } }
+    try { removeButton(); } catch (e) { /* ignore */ }
+    removeBtnStyle();
     try { domObserver.disconnect(); } catch (e) { /* ignore */ }
     try { styleObserver.disconnect(); } catch (e) { /* ignore */ }
     if (io) { try { io.disconnect(); } catch (e) { /* ignore */ } }
@@ -1132,6 +1654,8 @@
       document.removeEventListener('fullscreenchange', onFullscreen);
       document.removeEventListener('prerenderingchange', onPrerender);
       window.removeEventListener('yt-navigate-finish', onNavigate, true);
+      window.removeEventListener('yt-player-updated', onNavigate, true);
+      window.removeEventListener('popstate', onNavigate);
       window.removeEventListener('pageshow', onPageShow);
       window.removeEventListener('pagehide', onPageHide);
       if (navApi) navApi.removeEventListener('navigatesuccess', onNavigate);
@@ -1177,11 +1701,14 @@
     checkUrl();
     observeRoot(document); // document_start 时 documentElement 可能还不存在，直接观察 document
     fullScan();
+    removeStaleButtons(); // 扩展重新加载：旧实例的控制栏按钮
     document.addEventListener('DOMContentLoaded', onDomReady, { once: true });
     document.addEventListener('visibilitychange', onVisibility);
     document.addEventListener('fullscreenchange', onFullscreen);
     document.addEventListener('prerenderingchange', onPrerender);
     window.addEventListener('yt-navigate-finish', onNavigate, true);
+    window.addEventListener('yt-player-updated', onNavigate, true);
+    window.addEventListener('popstate', onNavigate);
     window.addEventListener('pageshow', onPageShow);
     window.addEventListener('pagehide', onPageHide);
     if (navApi && typeof navApi.addEventListener === 'function') navApi.addEventListener('navigatesuccess', onNavigate);
