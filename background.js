@@ -190,7 +190,8 @@ async function handleReport(msg, sender) {
   schedulePersist(tabId);
   await refreshBadge(tabId, t);
   if (settingsCache && settingsCache.hdrOnly) hoSchedule();
-  return eyeReply;
+  // 告诉内容脚本它在哪个标签页、哪个 frame：「只关 HDR」只对借开关时看的那个 frame 生效
+  return Object.assign({ tabId: tabId, frameId: frameId }, eyeReply);
 }
 
 // ---------- 角标 ----------
@@ -701,16 +702,26 @@ async function hoSetStatus(st) {
   await call(() => chrome.storage.local.set({ [HDR_ONLY_KEY]: st })).catch(noop);
 }
 
-// 当前窗口的当前标签页：主视频想关（不是 DRM）就要借
-async function hoWanted() {
+// 借开关时看的视频：当前窗口当前标签页里的主视频
+async function hoTarget() {
   const tab = await activeTab();
-  if (!tab || !validTabId(tab.id)) return false;
+  if (!tab || !validTabId(tab.id)) return null;
   const best = bestFrame(await getTab(tab.id));
-  const r = best && best.report;
+  return { tabId: tab.id, frameId: best ? best.frameId : 0, report: best ? best.report : null };
+}
+
+// 主视频想关（不是 DRM）就要借
+function hoWanted(target) {
+  const r = target && target.report;
   if (!r || !r.hasVideo || r.drm || r.state !== 'off') return false;
-  if (hoSuppress && hoSuppress.tabId === tab.id && hoSuppress.key === r.key) return false;
-  if (hoSuppress && (hoSuppress.tabId !== tab.id || hoSuppress.key !== r.key)) hoSuppress = null;
+  if (hoSuppress && hoSuppress.tabId === target.tabId && hoSuppress.key === r.key) return false;
+  if (hoSuppress && (hoSuppress.tabId !== target.tabId || hoSuppress.key !== r.key)) hoSuppress = null;
   return true;
+}
+
+// 内容脚本只在 tabId / frameId 这个 frame 里不加滤镜，其他窗口里想关的视频照常加滤镜
+function hoActiveStatus(target, leased) {
+  return { active: true, leased: leased, tabId: target ? target.tabId : -1, frameId: target ? target.frameId : -1 };
 }
 
 function hoEvaluate() {
@@ -742,7 +753,8 @@ async function hoEvaluateOnce() {
     return;
   }
   if (Date.now() < hoRetryAt) return; // 上次借失败了：这段时间按逐视频滤镜处理
-  if (await hoWanted()) {
+  const target = await hoTarget();
+  if (hoWanted(target)) {
     if (!(await hoAcquire())) {
       hoRetryAt = Date.now() + HO_RETRY_MS;
       await hoSetStatus({ active: false, leased: false, error: hoLastError });
@@ -752,17 +764,16 @@ async function hoEvaluateOnce() {
   } else {
     await hoRelease(true);
   }
-  await hoSetStatus({ active: true, leased: !!(hoLease && hoLease.held) });
+  await hoSetStatus(hoActiveStatus(target, !!(hoLease && hoLease.held)));
 }
 
 // 用户在弹窗里亲手改了全局 HDR：把开关还给用户（不恢复），这个视频不再借
 async function hoDrop() {
-  const tab = await activeTab();
-  const best = tab && validTabId(tab.id) ? bestFrame(await getTab(tab.id)) : null;
-  hoSuppress = tab && best && best.report ? { tabId: tab.id, key: best.report.key } : null;
+  const target = await hoTarget();
+  hoSuppress = target && target.report ? { tabId: target.tabId, key: target.report.key } : null;
   await hoRelease(false);
   const s = await getSettings();
-  await hoSetStatus({ active: !!(s.hdrOnly && hoCaps), leased: false });
+  await hoSetStatus(s.hdrOnly && hoCaps ? hoActiveStatus(target, false) : { active: false, leased: false });
 }
 
 chrome.tabs.onActivated.addListener(() => {

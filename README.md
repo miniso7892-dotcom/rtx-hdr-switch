@@ -89,7 +89,7 @@ If the status is inactive from the start, RTX Video HDR itself isn't working and
 | `Alt+Shift+H` | Turn white-background detection on/off |
 | `Alt+Shift+↑` / `Alt+Shift+↓` | NVIDIA middle grey +5 / −5 (needs the [local helper](#install-the-local-helper)) |
 | not set | Forget the current video's remembered choice |
-| not set | Apply the next NVIDIA preset (needs the local helper) |
+| not set | Switch to the next NVIDIA preset (needs the local helper) |
 
 Shortcuts only work while a browser window has focus. Change them from the Rules tab (**Change**) or at `chrome://extensions/shortcuts` (`edge://extensions/shortcuts` in Edge). If another extension already uses a key, the browser may not assign it; set it there by hand.
 
@@ -169,6 +169,7 @@ With this on (Rules tab), videos that should be SDR no longer get the filter (th
 - Global HDR goes off while the main video of the active tab in the focused window should be SDR, and comes back when it should be HDR, when you switch tabs, or when the video is gone.
 - In testing the switch took effect within 0.1–0.3 s, VSR stayed on, and white dropped exactly to the Windows SDR white.
 - Because it is the global switch, other videos playing at the same time (in another window or another app) turn SDR too.
+- Only the video in front is switched this way. A video in another browser window that should be SDR still gets the per-video filter, so it stays SDR while global HDR is on (and its VSR is off).
 - If the browser quits, crashes or the extension reloads, the local helper switches global HDR back on by itself.
 - If you switch global HDR yourself in the popup meanwhile, your choice wins and that video no longer borrows the switch.
 - Without the local helper (or with a 1.1 helper) the mode doesn't apply and the extension falls back to the per-video filter; the Rules tab says why.
