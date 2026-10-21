@@ -36,6 +36,7 @@
   let tabHost = '';
   let usable = false;
   let isFile = false;
+  let maybeFile = false; // 读不到网址（没有 tabs 权限时本地文件就是这样）且没开「允许访问文件网址」
   let frameId = 0;
   let current = null;
   let settings = L.mergeSettings(null);
@@ -283,7 +284,7 @@
   function renderState(st) {
     current = st;
     renderGlobalOff();
-    if (!usable) return showMessage(t('video.unusable'), false);
+    if (!usable) return showMessage(t(maybeFile ? 'video.unusableFile' : 'video.unusable'), false);
     if (!st) return showMessage(isFile ? t('video.fileAccess') : t('video.notConnected'), false);
     if (!st.hasVideo) {
       return showMessage(st.offscreen ? t('video.offscreen') : st.videoCount > 0 ? t('video.notShowing') : t('video.none'), false);
@@ -1289,6 +1290,11 @@
     const url = (tab && (tab.url || tab.pendingUrl)) || '';
     usable = tabId !== null && scriptable(url);
     isFile = /^file:/i.test(url);
+    if (tabId !== null && !url) {
+      try {
+        maybeFile = (await chrome.extension.isAllowedFileSchemeAccess()) === false;
+      } catch (e) { maybeFile = false; }
+    }
     tabHost = usable ? L.normalizeHost(L.hostOf(url)) : '';
     $('site-host').textContent = tabHost || '';
     $('site-rule').disabled = !tabHost;

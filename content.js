@@ -810,21 +810,9 @@
     if (v) setManual(v, state);
   }
 
-  // 以 storage 里的设置为准再切换，避免设置还没读出来时用默认值覆盖用户设置
+  // 设置只由 background 写：它按 storage 里的最新设置切换并在这个 frame 上显示提示，新设置经 storage.onChanged 回来
   function toggleAuto() {
-    storageCall(async () => {
-      const r = await chrome.storage.local.get('settings');
-      const next = L.toggleAutoMode(r && r.settings);
-      await chrome.storage.local.set({ settings: next });
-      if (destroyed) return;
-      settings = next;
-      settingsTouched = true;
-      settingsReady = true;
-      evaluate(true);
-      updateLang();
-      showOsd(next.autoDetect === 'off' ? L.t(lang, 'content.autoOff')
-        : L.t(lang, 'content.autoOn', { mode: L.autoModeText(next.autoDetect, lang) }), OSD_MS, primary, false);
-    });
+    storageCall(() => runtime.sendMessage({ type: 'settings-patch', op: 'toggle-auto' }));
   }
 
   function forgetVideo() {
@@ -1548,7 +1536,10 @@
     if (area !== 'local' || !changes) return;
     let dirty = false;
     if (changes.settings) {
-      settings = L.mergeSettings(changes.settings.newValue);
+      const next = L.mergeSettings(changes.settings.newValue);
+      // 切换自动检测的一方（快捷键由 background）自己显示提示，视频随之变化不再提示，免得盖掉它
+      if (next.autoDetect !== settings.autoDetect || next.autoLastMode !== settings.autoLastMode) quietNext = true;
+      settings = next;
       settingsTouched = true;
       updateLang();
       dirty = true;

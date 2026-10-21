@@ -34,5 +34,17 @@
   "cmdNextPreset": {
     "message": "Switch to the next NVIDIA preset",
     "description": "Command"
+  },
+  "cmdPeek": {
+    "message": "Compare HDR and SDR (back after 5 s)",
+    "description": "Command"
+  },
+  "cmdNextProfile": {
+    "message": "Switch to the next profile",
+    "description": "Command"
+  },
+  "cmdNvUndo": {
+    "message": "Undo the last NVIDIA change",
+    "description": "Command"
   }
 }

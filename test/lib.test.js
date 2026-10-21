@@ -195,8 +195,8 @@ test('文案', () => {
   assert.equal(L.reasonText('eye'), '护眼提醒');
   assert.equal(L.reasonText('default'), '默认');
   assert.equal(L.osdText('on', 'manual'), 'RTX HDR：开（手动）');
-  assert.equal(L.osdText('off', 'auto'), 'RTX HDR：关（自动检测·白底）');
-  assert.equal(L.formatLuma(0.72, 0.41), '画面亮度 72% · 白色占比 41%');
+  assert.equal(L.osdText('off', 'auto'), 'RTX HDR：关（检测到白底）');
+  assert.equal(L.formatLuma(0.72, 0.41), '画面亮度 72%，白色占比 41%');
   assert.equal(L.formatLuma(null, null), '');
 });
 
@@ -685,7 +685,7 @@ test('NV 常量', () => {
 
 test('mergeSettings: nv 默认值', () => {
   const m = L.mergeSettings(null);
-  assert.deepEqual(m.nv, { presets: [], nightPresetId: null, dayPresetId: null, followSdr: false, displayId: null });
+  assert.deepEqual(m.nv, { presets: [], nightPresetId: null, dayPresetId: null, followSdr: false, displayId: null, sitePresets: {} });
   assert.deepEqual(L.mergeSettings({ nv: 'x' }).nv, m.nv);
   assert.deepEqual(L.mergeSettings({ nv: { presets: 'x', nightPresetId: 5 } }).nv, m.nv);
   // 不共享默认对象
@@ -1023,10 +1023,10 @@ test('i18n：弹窗、选项页、内容脚本、background 用到的键都存�
 
 test('文案：英文', () => {
   assert.equal(L.reasonText('manual', 'en'), 'manual');
-  assert.equal(L.osdText('off', 'auto', 'en'), 'RTX HDR: off (auto · white)');
+  assert.equal(L.osdText('off', 'auto', 'en'), 'RTX HDR: off (white video detected)');
   assert.equal(L.osdText('on', 'nothing', 'en'), 'RTX HDR: on');
   assert.equal(L.autoModeText('both', 'en'), 'Turn off and on');
-  assert.equal(L.formatLuma(0.5, 0.25, 'en'), 'Brightness 50% · white 25%');
+  assert.equal(L.formatLuma(0.5, 0.25, 'en'), 'Brightness 50%, white 25%');
   assert.equal(L.eyeReminderText(30, false, '', 'en'), "You've watched HDR for 30 min — time to rest your eyes");
   assert.equal(L.nvErrorText({ code: 'range', field: 'hdr.peak' }, 'en'), 'Value out of range (peak brightness).');
   assert.equal(L.nvErrorText({ code: 'weird' }, 'en'), 'Unknown error (weird).');
@@ -1147,7 +1147,9 @@ test('备份：导出只带设置和视频记忆，导入前检查', () => {
 
   const back = L.validateBackup(JSON.parse(JSON.stringify(b)));
   assert.equal(back.ok, true);
-  assert.deepEqual(back.summary, { videos: 1, presets: 1, sites: 1 });
+  assert.deepEqual(back.summary, { videos: 1, presets: 1, sites: 1, profiles: 0 });
+  assert.equal(back.profiles, null, '没有配置档字段（1.2 的备份）：导入时保留现有的');
+  assert.ok(!('profiles' in b), 'storage 里没有配置档时不写这个字段');
   assert.deepEqual(back.settings, b.settings);
   assert.deepEqual(back.videos, { 'yt:abc': { s: 'off', t: 5 } });
 
@@ -1219,9 +1221,10 @@ test('manifest.json 合法且引用的文件都存在', () => {
   assert.equal(manifest.default_locale, 'en');
   assert.ok(manifest.name.length <= 75, 'name 不超过 75 字符');
   assert.equal(new URL(manifest.homepage_url).protocol, 'https:', 'homepage_url 是合法的 https 网址');
-  assert.equal(manifest.version, '1.2.0');
+  assert.equal(manifest.version, '1.3.0');
   assert.equal(manifest.minimum_chrome_version, '120'); // chrome.alarms 30 秒周期
-  assert.deepEqual(manifest.permissions.slice().sort(), ['alarms', 'nativeMessaging', 'scripting', 'storage', 'tabs']);
+  // 1.3 去掉 tabs：tab.url 由 <all_urls> 主机权限覆盖，tabs.query / sendMessage / create 不需要它
+  assert.deepEqual(manifest.permissions.slice().sort(), ['alarms', 'nativeMessaging', 'scripting', 'storage']);
   assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
   // 名称、说明、快捷键说明都走 _locales：每种语言都有全部的 __MSG_x__
   const used = new Set(Array.from(JSON.stringify(manifest).matchAll(/__MSG_(\w+)__/g), (m) => m[1]));
@@ -1244,6 +1247,7 @@ test('manifest.json 合法且引用的文件都存在', () => {
   assert.equal(manifest.commands['nv-mg-down'].suggested_key.default, 'Alt+Shift+Down');
   assert.ok(!manifest.commands['forget-video'].suggested_key);
   assert.ok(!manifest.commands['nv-next-preset'].suggested_key, '下一个 NVIDIA 预设：不预设快捷键');
+  for (const c of ['peek', 'next-profile', 'nv-undo']) assert.ok(manifest.commands[c] && !manifest.commands[c].suggested_key, c + '：1.3 新命令，不预设快捷键');
   // Chrome 最多接受 4 个预设快捷键
   assert.ok(Object.values(manifest.commands).filter((c) => c.suggested_key).length <= 4);
   assert.equal(manifest.options_ui.page, 'options.html');
@@ -1267,6 +1271,880 @@ test('manifest.json 合法且引用的文件都存在', () => {
     assert.equal(buf.toString('ascii', 1, 4), 'PNG', f);
     assert.equal(buf.readUInt32BE(16), Number(size), f + ' 宽度');
     assert.equal(buf.readUInt32BE(20), Number(size), f + ' 高度');
+  }
+});
+
+// ======================== 1.3 ========================
+
+// ---------- 设置：新字段 ----------
+
+test('mergeSettings 1.3：新字段的默认值与非法值', () => {
+  const d = L.mergeSettings(null);
+  assert.equal(d.playerPanel, 'hover');
+  assert.equal(d.fullscreenWeb, true);
+  assert.equal(d.updateCheck, true);
+  assert.deepEqual(d.nv.sitePresets, {});
+  const m = L.mergeSettings({ playerPanel: 'right', fullscreenWeb: false, updateCheck: false, defaultState: 'fullscreen', sites: { 'a.com': 'fullscreen', 'b.com': 'off' } });
+  assert.equal(m.playerPanel, 'right');
+  assert.equal(m.fullscreenWeb, false);
+  assert.equal(m.updateCheck, false);
+  assert.equal(m.defaultState, 'fullscreen');
+  assert.deepEqual(m.sites, { 'a.com': 'fullscreen', 'b.com': 'off' });
+  assert.equal(L.mergeSettings({ playerPanel: 'off' }).playerPanel, 'off');
+  const bad = L.mergeSettings({ playerPanel: 'Hover', fullscreenWeb: 'no', updateCheck: 0, defaultState: 'Fullscreen', sites: { 'a.com': 'FULLSCREEN' } });
+  assert.equal(bad.playerPanel, 'hover');
+  assert.equal(bad.fullscreenWeb, true);
+  assert.equal(bad.updateCheck, true);
+  assert.equal(bad.defaultState, 'on', '大小写不对回退成 on');
+  assert.deepEqual(bad.sites, {});
+  assert.equal(L.mergeSettings({ defaultState: 'whenever' }).defaultState, 'on');
+  assert.deepEqual(L.mergeSettings(m), m, '幂等');
+  assert.deepEqual(L.mergeSettings(undefined), JSON.parse(JSON.stringify(L.DEFAULT_SETTINGS)));
+});
+
+test('mergeSettings 1.3：nv.sitePresets 规范化、悬空引用、200 条上限', () => {
+  const ps = [preset('a', 'x'), preset('b', 'y')];
+  const m = L.mergeSettings({ nv: { presets: ps, sitePresets: { 'WWW.YouTube.com.': 'a', 'bilibili.com': 'b', 'gone.com': 'zzz', '': 'a', 'x.com': 5, 'y.com': null } } }).nv;
+  assert.deepEqual(m.sitePresets, { 'youtube.com': 'a', 'bilibili.com': 'b' });
+  // 预设删掉后，指向它的绑定一起去掉（同 nightPresetId）
+  assert.deepEqual(L.mergeSettings({ nv: { presets: [ps[0]], sitePresets: m.sitePresets } }).nv.sitePresets, { 'youtube.com': 'a' });
+  const many = {};
+  for (let i = 0; i < 250; i++) many['s' + i + '.com'] = 'a';
+  const capped = L.mergeSettings({ nv: { presets: ps, sitePresets: many } }).nv.sitePresets;
+  assert.equal(Object.keys(capped).length, L.NV_SITE_PRESETS_MAX);
+  assert.equal(capped['s0.com'], 'a');
+  assert.ok(!('s200.com' in capped));
+  assert.deepEqual(L.mergeSettings({ nv: { presets: ps, sitePresets: 'x' } }).nv.sitePresets, {});
+  const once = L.mergeSettings({ nv: { presets: ps, sitePresets: m.sitePresets } });
+  assert.deepEqual(L.mergeSettings(once), once, '幂等');
+});
+
+// ---------- 设置补丁 ----------
+
+test('applySettingsPatch：递归合并、null 删除网站键、数组整体替换、不修改输入', () => {
+  const cur = S({ osd: true, sites: { 'a.com': 'on', 'b.com': 'off' }, night: { enabled: true, start: '22:00', end: '06:00' },
+    nv: { presets: [preset('p1', 'x'), preset('p2', 'y')], sitePresets: { 'a.com': 'p1' } } });
+  const snap = JSON.stringify(cur);
+  const patch = { osd: false, night: { start: '21:30' }, sites: { 'WWW.A.com': null, 'c.com': 'fullscreen' }, nv: { sitePresets: { 'b.com': 'p2' } } };
+  const psnap = JSON.stringify(patch);
+  const out = L.applySettingsPatch(cur, patch);
+  assert.equal(out.osd, false);
+  assert.deepEqual(out.night, { enabled: true, start: '21:30', end: '06:00' });
+  assert.deepEqual(out.sites, { 'b.com': 'off', 'c.com': 'fullscreen' });
+  assert.deepEqual(out.nv.sitePresets, { 'a.com': 'p1', 'b.com': 'p2' });
+  assert.equal(out.nv.presets.length, 2, '没提到的数组保留');
+  assert.equal(JSON.stringify(cur), snap, '不修改输入');
+  assert.equal(JSON.stringify(patch), psnap, '不修改补丁');
+  // 数组整体替换；删掉预设后指向它的绑定一起清掉
+  const r = L.applySettingsPatch(cur, { nv: { presets: [preset('p2', 'y')] } });
+  assert.deepEqual(r.nv.presets.map((p) => p.id), ['p2']);
+  assert.deepEqual(r.nv.sitePresets, {});
+  // 结果总是过 mergeSettings
+  assert.equal(L.applySettingsPatch(cur, { defaultState: 'bogus' }).defaultState, 'on');
+  assert.ok(!('junk' in L.applySettingsPatch(cur, { junk: 1 })));
+  assert.deepEqual(L.applySettingsPatch(cur, null), cur);
+  assert.deepEqual(L.applySettingsPatch(undefined, {}), L.mergeSettings(null));
+  assert.equal(L.applySettingsPatch(cur, 'x'), null);
+  assert.equal(L.applySettingsPatch(cur, []), null);
+  // __proto__ 不会污染原型
+  const evil = L.applySettingsPatch(cur, JSON.parse('{"__proto__": {"polluted": 1}, "sites": {"__proto__": "on"}}'));
+  assert.equal(({}).polluted, undefined);
+  assert.equal(evil.polluted, undefined);
+  assert.deepEqual(evil.sites, cur.sites);
+});
+
+test('settingsPatchFor：最小补丁，与 applySettingsPatch 往返一致', () => {
+  const a = S({ sites: { 'a.com': 'on', 'b.com': 'off' }, nv: { presets: [preset('p1', 'x')], sitePresets: { 'a.com': 'p1' } } });
+  assert.equal(L.settingsPatchFor(a, a), null);
+  assert.equal(L.settingsPatchFor(a, JSON.parse(JSON.stringify(a))), null);
+  const b = JSON.parse(JSON.stringify(a));
+  b.osd = false;
+  b.night.end = '08:00';
+  delete b.sites['a.com'];
+  b.sites['c.com'] = 'fullscreen';
+  b.nv.sitePresets = {};
+  b.ui.accent = '#C8FF2E';
+  const p = L.settingsPatchFor(a, b);
+  assert.deepEqual(p, { osd: false, night: { end: '08:00' }, sites: { 'a.com': null, 'c.com': 'fullscreen' }, ui: { accent: '#C8FF2E' }, nv: { sitePresets: { 'a.com': null } } });
+  assert.deepEqual(L.applySettingsPatch(a, p), L.mergeSettings(b));
+  // 数组整体替换
+  const c = JSON.parse(JSON.stringify(a));
+  c.nv.presets.push(preset('p2', 'y'));
+  assert.deepEqual(L.settingsPatchFor(a, c), { nv: { presets: c.nv.presets } });
+  for (const next of [c, S({ defaultState: 'fullscreen' }), S({ eye: { minutes: 10 } }), S(), S({ sites: { 'x.com': 'off' } })]) {
+    assert.deepEqual(L.applySettingsPatch(a, L.settingsPatchFor(a, next)), L.mergeSettings(next));
+  }
+});
+
+test('contentPatchAllowed：只放行白名单字段和顶层网站自己的那一条', () => {
+  const ok = (p, host) => L.contentPatchAllowed(p, host === undefined ? 'www.example.com' : host);
+  const all = { autoDetect: 'both', sensitivity: 'high', playerButton: false, playerPanel: 'right', autoLastMode: 'both' };
+  assert.deepEqual(ok(all), { ok: true, patch: all });
+  assert.deepEqual(ok({ sites: { 'example.com': 'off' } }), { ok: true, patch: { sites: { 'example.com': 'off' } } });
+  assert.deepEqual(ok({ sites: { 'WWW.Example.com': null } }), { ok: true, patch: { sites: { 'example.com': null } } });
+  assert.equal(ok({ sites: { 'example.com': 'fullscreen' } }).ok, true);
+  // 网站预设只有面板（第三个参数）能改，内容脚本改不了
+  const panel = (p) => L.contentPatchAllowed(p, 'www.example.com', true);
+  assert.deepEqual(panel({ nv: { sitePresets: { 'example.com': 'p1' } } }), { ok: true, patch: { nv: { sitePresets: { 'example.com': 'p1' } } } });
+  assert.equal(panel({ nv: { sitePresets: { 'example.com': null } } }).ok, true);
+  for (const bad of [{ nv: { sitePresets: { 'other.com': 'p1' } } }, { nv: { presets: [] } }, { hdrOnly: true }]) assert.equal(panel(bad).ok, false, JSON.stringify(bad));
+  assert.deepEqual(ok({}), { ok: true, patch: {} });
+  const forbidden = { ok: false, code: 'forbidden' };
+  for (const bad of [
+    null, 'x', [],
+    { sites: { 'other.com': 'off' } }, // 别的网站
+    { sites: { 'example.com': 'off', 'other.com': 'on' } },
+    { sites: { 'example.com': 'maybe' } },
+    { sites: 'off' },
+    { nv: { presets: [] } }, // NVIDIA 预设本身
+    { nv: { sitePresets: { 'example.com': 'p1' } } }, // 网站预设会让 background 写 NVIDIA：内容脚本不能改
+    { nv: { sitePresets: { 'example.com': null } } },
+    { nv: { sitePresets: { 'example.com': 'p1' }, followSdr: true } },
+    { nv: { sitePresets: { 'other.com': 'p1' } } },
+    { nv: { sitePresets: { 'example.com': 'bad id' } } },
+    { hdrOnly: true }, { osd: false }, { defaultState: 'off' }, { ui: { lang: 'en' } }, { updateCheck: false }, // 白名单以外
+    { autoDetect: 'sometimes' }, { playerButton: 'yes' }, { playerPanel: 'always' },
+    { autoDetect: 'off', eye: { minutes: 1 } } // 混进一个越权字段：整单拒绝
+  ]) assert.deepEqual(ok(bad), forbidden, JSON.stringify(bad));
+  assert.deepEqual(ok({ sites: { 'example.com': 'off' } }, ''), forbidden, '不知道顶层网站时不能改网站规则');
+  const input = { sites: { 'WWW.example.com': 'on' } };
+  ok(input);
+  assert.deepEqual(input, { sites: { 'WWW.example.com': 'on' } }, '不修改输入');
+});
+
+// ---------- NVIDIA 写入：借用、去重 ----------
+
+test('nvUnleased / nvEffectiveState：借用期间用借用前的值', () => {
+  const leased = nvState({ hdr: { enabled: false } });
+  assert.equal(L.nvUnleased(leased, { held: true, prevEnabled: true }).hdr.enabled, true);
+  assert.equal(L.nvEffectiveState(leased, { active: true, leased: true, prevEnabled: true }).hdr.enabled, true, 'hdrOnlyStatus 的写法');
+  assert.ok(!('enabled' in L.nvUnleased(leased, { held: true }).hdr), '不知道借用前的值：去掉 enabled');
+  assert.equal(L.nvUnleased(leased, { held: false, prevEnabled: true }).hdr.enabled, false, '没在借');
+  assert.equal(L.nvUnleased(leased, null).hdr.enabled, false);
+  assert.equal(L.nvUnleased(null, { held: true }), null);
+  assert.equal(leased.hdr.enabled, false, '不修改输入');
+  // 借用期间存的预设不会存成「关」；不知道借用前的值时不带开关
+  assert.equal(L.nvPresetFromState(L.nvUnleased(leased, { held: true, prevEnabled: true }), 'x', 'p1').hdr.enabled, true);
+  assert.ok(!('enabled' in L.nvPresetFromState(L.nvUnleased(leased, { held: true }), 'x', 'p1').hdr));
+});
+
+test('nvLeaseAdjust：借用与 suppress / yield 的 6 种组合', () => {
+  const on = { hdr: { enabled: true, peak: 800 }, commit: true };
+  const off = { hdr: { enabled: false }, commit: true };
+  const lease = { held: true, prevEnabled: true };
+  // 1. 没在借
+  assert.deepEqual(L.nvLeaseAdjust(on, { held: false }, 'suppress'), { patch: on, action: 'none' });
+  // 2. 补丁不带 enabled
+  assert.deepEqual(L.nvLeaseAdjust({ hdr: { peak: 800 } }, lease, 'suppress'), { patch: { hdr: { peak: 800 } }, action: 'none' });
+  // 3. 在借 + suppress（用户亲手拨开关）
+  assert.deepEqual(L.nvLeaseAdjust(on, lease, 'suppress'), { patch: on, action: 'drop-suppress' });
+  // 4. 在借 + yield + 与借用前相同：去掉 enabled，不闪烁
+  assert.deepEqual(L.nvLeaseAdjust(on, lease, 'yield'), { patch: { hdr: { peak: 800 }, commit: true }, action: 'none' });
+  assert.deepEqual(L.nvLeaseAdjust({ hdr: { enabled: true } }, lease, 'yield'), { patch: {}, action: 'none' }, 'hdr 空了就去掉');
+  // 5. 在借 + yield + 不同
+  assert.deepEqual(L.nvLeaseAdjust(off, lease, 'yield'), { patch: off, action: 'drop-yield' });
+  // 6. 在借 + yield + 不知道借用前的值
+  assert.equal(L.nvLeaseAdjust(on, { held: true }, 'yield').action, 'drop-yield');
+  assert.equal(on.hdr.enabled, true, '不修改输入');
+  assert.equal(L.nvLeaseAdjust(null, lease, 'yield'), null);
+  assert.equal(L.nvLeaseAdjust(on, { leased: true, prevEnabled: true }, 'suppress').action, 'drop-suppress', 'hdrOnlyStatus 的写法');
+});
+
+test('nvAutoGuard / nvPatchDelta', () => {
+  const follow = S({ nv: { followSdr: true } });
+  const p = { hdr: { middleGrey: 50, peak: 900 }, commit: true };
+  assert.deepEqual(L.nvAutoGuard(p, follow, 'schedule'), { hdr: { peak: 900 }, commit: true });
+  assert.deepEqual(L.nvAutoGuard(p, follow, 'site'), { hdr: { peak: 900 }, commit: true });
+  assert.deepEqual(L.nvAutoGuard({ hdr: { middleGrey: 50 }, commit: true }, follow, 'site'), { commit: true });
+  for (const src of ['popup', 'panel', 'hotkey', 'profile', 'undo']) assert.deepEqual(L.nvAutoGuard(p, follow, src), p, src);
+  assert.deepEqual(L.nvAutoGuard(p, S(), 'schedule'), p, '没开跟随 SDR');
+  assert.equal(p.hdr.middleGrey, 50, '不修改输入');
+  assert.equal(L.nvAutoGuard(null, follow, 'site'), null);
+
+  assert.deepEqual(L.nvPatchDelta({ hdr: { peak: 1000, middleGrey: 70, enabled: true }, vsr: { mode: 5, priority: 1 }, indicator: false, commit: true }, NV_STATE),
+    { hdr: { middleGrey: 70 }, vsr: { priority: 1 }, commit: true });
+  assert.equal(L.nvPatchDelta({ hdr: { peak: 1000 }, vsr: { mode: 5 }, commit: true }, NV_STATE), null, '全都相同：不写');
+  assert.deepEqual(L.nvPatchDelta({ hdr: { peak: 1000 } }, null), { hdr: { peak: 1000 } }, '读不到状态时不去重');
+  assert.equal(L.nvPatchDelta(null, NV_STATE), null);
+});
+
+// ---------- 修改记录与撤销 ----------
+
+test('nvStateDiff / nvChangeText', () => {
+  const after = nvState({ hdr: { middleGrey: 70, peak: 800, contrast: -5 }, vsr: { mode: 0 } });
+  const d = L.nvStateDiff(NV_STATE, after);
+  assert.deepEqual(d, {
+    before: { hdr: { peak: 1000, middleGrey: 65, contrast: 25 }, vsr: { mode: 5 } },
+    after: { hdr: { peak: 800, middleGrey: 70, contrast: -5 }, vsr: { mode: 0 } }
+  });
+  assert.equal(L.nvStateDiff(NV_STATE, nvState()), null);
+  assert.equal(L.nvStateDiff(NV_STATE, null), null);
+  // 只比较可写字段（active、level、flags 不算）
+  assert.equal(L.nvStateDiff(NV_STATE, Object.assign(nvState({ hdr: { active: true }, vsr: { level: 3 } }), { flags: 4 })), null);
+  assert.equal(L.nvChangeText(d), '最高亮度 1000 → 800，中间灰 65 → 70，对比度 +25 → -5，超分辨率 自动 → 关');
+  assert.equal(L.nvChangeText(d, 'en'), 'peak brightness 1000 → 800, middle grey 65 → 70, contrast +25 → -5, super resolution Auto → Off');
+  assert.equal(L.nvChangeText({ before: { hdr: { enabled: true } }, after: { hdr: { enabled: false } } }), 'HDR 开 → 关');
+  assert.equal(L.nvChangeText({ after: { vsr: { priority: 0 } } }), 'GPU 优先级 低');
+  assert.equal(L.nvChangeText(null), '');
+  assert.ok(!L.nvChangeText(d).includes('\u00b7') && !L.nvChangeText(d, 'en').includes('\u00b7'));
+});
+
+const logEntry = (o) => Object.assign({ at: 1000, source: 'popup', ok: true, undoable: true, before: { hdr: { middleGrey: 65 } }, after: { hdr: { middleGrey: 70 } } }, o);
+
+test('nvLogEntry / nvLogAppend：规范化与环形上限', () => {
+  const e = L.nvLogEntry(logEntry({ label: 'x'.repeat(60), junk: 1, before: { hdr: { middleGrey: 65, peak: 5, foo: 1 } } }));
+  assert.equal(e.label.length, 40);
+  assert.ok(!('junk' in e));
+  assert.deepEqual(e.before, { hdr: { middleGrey: 65 } }, '超出范围和未知的字段丢掉');
+  assert.equal(e.undoable, true);
+  const failed = L.nvLogEntry(logEntry({ ok: false, error: { code: 'hdr-error', errorCode: 2, x: 1 } }));
+  assert.equal(failed.undoable, false, '失败的不可撤销');
+  assert.deepEqual(failed.error, { code: 'hdr-error', errorCode: 2 });
+  assert.equal(L.nvLogEntry(logEntry({ unconfirmed: true })).undoable, false, '未确认的不可撤销');
+  assert.equal(L.nvLogEntry(logEntry({ after: undefined })).undoable, false, '没有修改后的值');
+  for (const bad of [null, logEntry({ source: 'evil' }), logEntry({ at: NaN }), logEntry({ at: -1 })]) assert.equal(L.nvLogEntry(bad), null);
+
+  let log = null;
+  for (let i = 0; i < 105; i++) log = L.nvLogAppend(log, logEntry({ at: 1000 + i }));
+  assert.equal(log.v, 1);
+  assert.equal(log.list.length, L.NV_LOG_MAX);
+  assert.equal(log.seq, 105);
+  assert.equal(log.list[0].id, 6);
+  assert.equal(log.list[99].id, 105);
+  const snap = JSON.stringify(log);
+  assert.equal(L.nvLogAppend(log, { source: 'bogus' }).seq, 105, '不合法的条目不追加');
+  L.nvLogAppend(log, logEntry());
+  assert.equal(JSON.stringify(log), snap, '不修改输入');
+  let small = null;
+  for (let i = 0; i < 5; i++) small = L.nvLogAppend(small, logEntry(), 3);
+  assert.deepEqual(small.list.map((x) => x.id), [3, 4, 5]);
+  assert.equal(L.nvLogMarkUndone(small, 4).list[1].undone, true);
+  assert.ok(!small.list[1].undone, '不修改输入');
+});
+
+test('nvUndoTarget：跳过已撤销、借用、撤销、失败、过期的条目', () => {
+  const now = 1e10;
+  let log = null;
+  const add = (o) => { log = L.nvLogAppend(log, logEntry(Object.assign({ at: now - 1000 }, o))); return log.seq; };
+  const old = add({ at: now - 2 * 3600000 });
+  const good = add({});
+  add({ source: 'lease', undoable: false });
+  add({ ok: false, error: { code: 'api' } });
+  const done = add({});
+  log = L.nvLogMarkUndone(log, done);
+  add({ source: 'undo', undoOf: done });
+  assert.equal(L.nvUndoTarget(log, now).id, good);
+  log = L.nvLogMarkUndone(log, good);
+  assert.equal(L.nvUndoTarget(log, now), null, '更早的那条已经超过 1 小时');
+  assert.equal(L.nvUndoTarget(log, now, 3 * 3600000).id, old, '放宽时限后可以撤销');
+  assert.equal(L.nvUndoTarget(null, now), null);
+});
+
+test('nvWriteEntry：写入结果 → 修改记录条目', () => {
+  const before = nvState({ hdr: { middleGrey: 65, peak: 1000 } });
+  const after = nvState({ hdr: { middleGrey: 70, peak: 1000 } });
+  const patch = { hdr: { middleGrey: 70, peak: 1000 }, commit: true };
+  const snap = JSON.stringify([before, after, patch]);
+  const ok = L.nvWriteEntry({ source: 'hotkey', at: 5, label: '电影', before, after, patch, undoOf: 3 });
+  assert.deepEqual(ok, { id: 0, at: 5, source: 'hotkey', label: '电影', ok: true, before: { hdr: { middleGrey: 65 } }, after: { hdr: { middleGrey: 70 } },
+    want: { hdr: { peak: 1000, middleGrey: 70 } }, undoable: true, undoOf: 3 });
+  assert.equal(JSON.stringify([before, after, patch]), snap, '不修改输入');
+  assert.equal(L.nvWriteEntry({ source: 'popup', at: 5, before, after: before, patch }), null, '没变化不记');
+  const failed = L.nvWriteEntry({ source: 'schedule', at: 5, before, after: null, patch, error: { code: 'api', written: ['0x318'] } });
+  assert.deepEqual(failed.before, { hdr: { peak: 1000, middleGrey: 65 } }, '失败时 before 只留补丁涉及的字段');
+  assert.deepEqual(failed.error, { code: 'api', written: true });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.undoable, false);
+  const unc = L.nvWriteEntry({ source: 'popup', at: 5, before, after: null, patch, unconfirmed: true });
+  assert.equal(unc.unconfirmed, true);
+  assert.equal(unc.undoable, false, '未确认的不可撤销');
+  assert.equal(L.nvWriteEntry({ source: 'popup', at: 5, before, after: null, patch: {}, unconfirmed: true }), null);
+  const lease = L.nvWriteEntry({ source: 'lease', at: 5, before: { hdr: { enabled: true } }, after: { hdr: { enabled: false } } });
+  assert.deepEqual([lease.before, lease.after, lease.undoable], [{ hdr: { enabled: true } }, { hdr: { enabled: false } }, false], '借用不可撤销');
+  for (const bad of [null, { source: 'evil', at: 5, before, after }, { source: 'popup', before, after }]) assert.equal(L.nvWriteEntry(bad), null);
+  // 能直接追加进日志，撤销能找到它
+  const log = L.nvLogAppend(null, ok);
+  assert.equal(L.nvUndoTarget(log, 10).id, 1);
+});
+
+test('nvUndoPatch：实时值仍等于修改后的值才撤销，peak 夹到实时范围，HDR 出错时去掉 hdr', () => {
+  const e = { before: { hdr: { middleGrey: 65, peak: 3000 }, vsr: { mode: 5 } }, after: { hdr: { middleGrey: 70, peak: 1500 }, vsr: { mode: 1 } } };
+  const live = nvState({ hdr: { middleGrey: 70, peak: 1500 }, vsr: { mode: 1 } });
+  assert.deepEqual(L.nvUndoPatch(e, live), { patch: { hdr: { middleGrey: 65, peak: 1970 }, vsr: { mode: 5 }, commit: true }, skipped: [], unavailable: [] });
+  assert.equal(L.nvValidatePatch(L.nvUndoPatch(e, live).patch, live).ok, true, '结果能通过校验');
+  // 中间灰之后又被改过：只撤销其他字段
+  const moved = nvState({ hdr: { middleGrey: 80, peak: 1500 }, vsr: { mode: 1 } });
+  assert.deepEqual(L.nvUndoPatch(e, moved), { patch: { hdr: { peak: 1970 }, vsr: { mode: 5 }, commit: true }, skipped: ['hdr.middleGrey'], unavailable: [] });
+  // HDR 出错：只撤销超分，HDR 的字段算「现在写不了」，不算「之后又被改过」
+  const err = nvState({ hdr: { middleGrey: 70, peak: 1500, error: 2 }, vsr: { mode: 1 } });
+  assert.deepEqual(L.nvUndoPatch(e, err), { patch: { vsr: { mode: 5 }, commit: true }, skipped: [], unavailable: ['hdr.peak', 'hdr.middleGrey'] });
+  assert.equal(L.nvUndoPatch(e, NV_STATE).patch, null, '全都被改过');
+  // 最高亮度夹到实时范围后正好等于改后的值：没有要写的，两个列表都空（这条算已撤销）
+  const clamped = { before: { hdr: { peak: 3000 } }, after: { hdr: { peak: 1970 } } };
+  assert.deepEqual(L.nvUndoPatch(clamped, nvState({ hdr: { peak: 1970 } })), { patch: null, skipped: [], unavailable: [] });
+  // 写不了的原因：nvErrorText 能显示
+  assert.deepEqual(L.nvUnavailableError(err, 'hdr.peak'), { code: 'hdr-error', errorCode: 2 });
+  assert.deepEqual(L.nvUnavailableError(nvState({ hdr: { supported: false } }), 'hdr.middleGrey'), { code: 'unsupported', field: 'hdr' });
+  assert.deepEqual(L.nvUnavailableError(nvState({ vsr: { priority: null } }), 'vsr.priority'), { code: 'unsupported', field: 'vsr.priority' });
+  assert.deepEqual(L.nvUnavailableError(nvState({ vsr: { supported: false } }), 'vsr.mode'), { code: 'unsupported', field: 'vsr' });
+  assert.equal(L.nvUnavailableError(live, 'hdr.peak'), null, '能写');
+  assert.equal(L.nvUnavailableError(live, 'nope'), null);
+  assert.equal(L.nvUnavailableError(null, 'hdr.peak'), null);
+  assert.equal(L.nvUndoPatch(null, live), null);
+  assert.equal(L.nvUndoPatch(e, null), null);
+});
+
+test('nvUndoPatch：借用期间 hdr.enabled 和借用前的值比较', () => {
+  const on = { before: { hdr: { enabled: false } }, after: { hdr: { enabled: true } } };
+  const leased = nvState({ hdr: { enabled: false } }); // 实时的「关」是借来的
+  assert.deepEqual(L.nvUndoPatch(on, leased), { patch: null, skipped: ['hdr.enabled'], unavailable: [] }, '不看借用会误判为之后又被改过');
+  assert.deepEqual(L.nvUndoPatch(on, leased, { held: true, prevEnabled: true }),
+    { patch: { hdr: { enabled: false }, commit: true }, skipped: [], unavailable: [] });
+  assert.deepEqual(L.nvUndoPatch(on, leased, { leased: true, prevEnabled: true }).patch, { hdr: { enabled: false }, commit: true }, '也接受 hdrOnlyStatus');
+  assert.deepEqual(L.nvUndoPatch(on, leased, { held: true, prevEnabled: null }), { patch: null, skipped: ['hdr.enabled'], unavailable: [] }, '不知道借用前的值：不撤销开关');
+  const off = { before: { hdr: { enabled: true } }, after: { hdr: { enabled: false } } };
+  assert.deepEqual(L.nvUndoPatch(off, leased, { held: true, prevEnabled: false }).patch, { hdr: { enabled: true }, commit: true });
+  assert.deepEqual(L.nvUndoPatch(off, leased, { held: false, prevEnabled: true }).patch, { hdr: { enabled: true }, commit: true }, '没在借：看实时值');
+  assert.deepEqual(leased, nvState({ hdr: { enabled: false } }), '不修改输入');
+});
+
+test('nvRevertPatch：只还原有差异的字段，peak 夹到实时范围，HDR 出错时跳过', () => {
+  const snap = nvState({ hdr: { middleGrey: 50, peak: 2500 } });
+  const cur = nvState({ hdr: { middleGrey: 80 } });
+  assert.deepEqual(L.nvRevertPatch(cur, snap), { hdr: { peak: 1970, middleGrey: 50 }, commit: true });
+  assert.equal(L.nvRevertPatch(NV_STATE, nvState()), null, '没有差异');
+  assert.deepEqual(L.nvRevertPatch(nvState({ hdr: { error: 2, middleGrey: 80 }, vsr: { mode: 1 } }), snap), { vsr: { mode: 5 }, commit: true });
+  assert.equal(L.nvRevertPatch(nvState({ hdr: { peak: 1970, middleGrey: 50 } }), snap), null, '夹完后和实时值相同');
+  // 打开时正在借用：快照里没有 enabled，不会把 HDR 关掉
+  const leasedSnap = L.nvEffectiveState(nvState({ hdr: { enabled: false } }), { leased: true });
+  assert.equal(L.nvRevertPatch(nvState({ hdr: { enabled: true } }), leasedSnap), null);
+  assert.equal(L.nvRevertPatch(null, snap), null);
+  assert.equal(L.nvRevertPatch(cur, null), null);
+});
+
+// ---------- 按网站切换 NVIDIA 预设 ----------
+
+test('sitePresetFor：先看顶层页面，再看 frame 自己的', () => {
+  const sp = { 'blog.example': 'p1', 'youtube.com': 'p2' };
+  assert.equal(L.sitePresetFor(sp, 'www.youtube.com', 'www.blog.example'), 'p1');
+  assert.equal(L.sitePresetFor(sp, 'www.youtube.com', 'news.test'), 'p2');
+  assert.equal(L.sitePresetFor(sp, 'www.youtube.com'), 'p2');
+  assert.equal(L.sitePresetFor(sp, 'other.com', 'x.com'), null);
+  assert.equal(L.sitePresetFor(null, 'youtube.com'), null);
+});
+
+test('nvSiteDecide：进入、暂停、A → B、离开、宽限期、手动、绑定被删', () => {
+  const sp = { 'a.com': 'p1', 'b.com': 'p2' };
+  const now = 100000;
+  const T = (host, o) => Object.assign({ topHost: host, frameHost: host, hasVideo: true, playing: true }, o);
+  const D = (record, target, extra) => L.nvSiteDecide(Object.assign({ record, target, sitePresets: sp, presetIds: ['p1', 'p2'], now }, extra));
+  const recA = { host: 'a.com', presetId: 'p1', seenAt: now - 5000, base: {}, wrote: {} };
+  // 进入：在绑定网站上播放
+  assert.deepEqual(D(null, T('www.a.com')), { action: 'apply', host: 'a.com', presetId: 'p1', at: now });
+  assert.deepEqual(D(null, T('a.com', { playing: false })), { action: 'none' }, '暂停时不套用');
+  assert.deepEqual(D(null, T('other.com')), { action: 'none' });
+  assert.deepEqual(D(null, null), { action: 'none' });
+  // 同一网站、同一预设：只更新 seenAt（暂停也算还在看）
+  assert.deepEqual(D(recA, T('a.com', { playing: false })), { action: 'none', host: 'a.com', presetId: 'p1', at: now });
+  assert.equal(D(Object.assign({ manual: true }, recA), T('a.com')).action, 'none', '手动改过也不重新套用');
+  // A → B；同一网站换了绑定
+  assert.deepEqual(D(recA, T('b.com')), { action: 'apply', host: 'b.com', presetId: 'p2', at: now });
+  assert.deepEqual(D(recA, T('a.com'), { sitePresets: { 'a.com': 'p2' } }), { action: 'apply', host: 'a.com', presetId: 'p2', at: now });
+  // 仍在绑定网站但没有视频：宽限期内等，过了离开
+  assert.deepEqual(D(recA, T('a.com', { hasVideo: false, playing: false })), { action: 'wait', host: 'a.com', at: recA.seenAt + L.NV_SITE_GRACE_MS });
+  assert.deepEqual(D(Object.assign({}, recA, { seenAt: now - 31000 }), T('a.com', { hasVideo: false, playing: false })), { action: 'leave', host: 'a.com' });
+  // 换到未绑定的网站、chrome:// 页面（没有目标）、绑定被删、预设被删
+  assert.deepEqual(D(recA, T('other.com')), { action: 'leave', host: 'a.com' });
+  assert.deepEqual(D(recA, null), { action: 'leave', host: 'a.com' });
+  assert.deepEqual(D(recA, T('a.com'), { sitePresets: {} }), { action: 'leave', host: 'a.com' });
+  assert.deepEqual(D(recA, T('a.com'), { presetIds: ['p2'] }), { action: 'leave', host: 'a.com' });
+  // 嵌入的播放器：按顶层页面的域名
+  assert.equal(D(null, T('a.com', { frameHost: 'www.youtube.com' })).host, 'a.com');
+  assert.equal(D(null, T('news.test', { frameHost: 'b.com' })).host, 'b.com', '顶层没绑定时看 frame 自己的');
+});
+
+test('nvSiteRestorePatch：只恢复实时值仍等于写入值的字段', () => {
+  const rec = { base: { hdr: { peak: 1000, middleGrey: 65, contrast: 25 } }, wrote: { hdr: { peak: 800, middleGrey: 50, contrast: 25 } } };
+  assert.deepEqual(L.nvSiteRestorePatch(rec, nvState({ hdr: { peak: 800, middleGrey: 50 } })), { hdr: { peak: 1000, middleGrey: 65 }, commit: true });
+  assert.deepEqual(L.nvSiteRestorePatch(rec, nvState({ hdr: { peak: 800, middleGrey: 55 } })), { hdr: { peak: 1000 }, commit: true }, '用户改过的中间灰不动');
+  assert.equal(L.nvSiteRestorePatch(rec, NV_STATE), null, '都已经被改回去了');
+  assert.equal(L.nvSiteRestorePatch(rec, nvState({ hdr: { peak: 800, middleGrey: 50, error: 1 } })), null, 'HDR 出错时不写 hdr');
+  assert.equal(L.nvSiteRestorePatch(null, NV_STATE), null);
+});
+
+// ---------- 配置档 ----------
+
+const profileSettings = () => S({ defaultState: 'off', osd: false, night: { enabled: true, start: '22:00', end: '06:00' }, sites: { 'a.com': 'on' },
+  ui: { lang: 'en' }, nv: { presets: [preset('p1', 'x')], displayId: 'dev-1', followSdr: true } });
+
+test('配置档的两组键正好覆盖 DEFAULT_SETTINGS 的全部顶层键', () => {
+  const b = L.PROFILE_BEHAVIOR_KEYS, e = L.PROFILE_EXCLUDED_KEYS;
+  assert.deepEqual(b.concat(e).sort(), Object.keys(L.DEFAULT_SETTINGS).sort(), '新设置要决定归哪一组');
+  assert.equal(b.filter((k) => e.includes(k)).length, 0, '两组不重叠');
+  assert.ok(Object.isFrozen(b) && Object.isFrozen(e));
+});
+
+test('normProfile / normProfiles', () => {
+  const p = L.normProfile({ id: 'p1', name: '  电影  ', savedAt: 5, behavior: { osd: false, junk: 1, ui: { lang: 'en' } },
+    sites: { 'WWW.A.com': 'off', 'b.com': 'x' }, nv: { hdr: { peak: 1000, middleGrey: 60, contrast: 0, saturation: 0 }, indicator: true, junk: 1 }, junk: 1 });
+  assert.equal(p.name, '电影');
+  assert.deepEqual(Object.keys(p.behavior).sort(), L.PROFILE_BEHAVIOR_KEYS.slice().sort());
+  assert.equal(p.behavior.osd, false);
+  assert.ok(!('ui' in p.behavior) && !('junk' in p));
+  assert.deepEqual(p.sites, { 'a.com': 'off' });
+  assert.deepEqual(p.nv, { hdr: { peak: 1000, middleGrey: 60, contrast: 0, saturation: 0 }, indicator: true });
+  assert.deepEqual(L.normProfile(p), p, '幂等');
+  for (const bad of [null, { id: 'p1', name: 'x' }, { id: 'bad id', name: 'x', behavior: {} }, { id: 'p1', name: ' ', behavior: {} }]) assert.equal(L.normProfile(bad), null);
+  assert.ok(!('nv' in L.normProfile({ id: 'p1', name: 'x', behavior: {}, nv: { hdr: { peak: 'x' } } })), '坏的 NVIDIA 部分丢掉');
+  const sites = {};
+  for (let i = 0; i < 1100; i++) sites['s' + i + '.com'] = 'on';
+  assert.equal(Object.keys(L.normProfile({ id: 'p1', name: 'x', behavior: {}, sites }).sites).length, 1000, '网站规则最多 1000 条');
+
+  const list = [];
+  for (let i = 0; i < 25; i++) list.push({ id: 'p' + i, name: 'n' + i, behavior: {} });
+  list.splice(1, 0, { id: 'p0', name: 'dup', behavior: {} });
+  const ps = L.normProfiles({ list, activeId: 'p3' });
+  assert.equal(ps.v, 1);
+  assert.equal(ps.list.length, L.PROFILES_MAX);
+  assert.equal(ps.list[1].id, 'p1', 'id 去重');
+  assert.equal(ps.activeId, 'p3');
+  assert.equal(L.normProfiles({ list, activeId: 'p24' }).activeId, null, 'activeId 必须在列表里');
+  assert.deepEqual(L.normProfiles(null), { v: 1, list: [], activeId: null });
+});
+
+test('profileFromCurrent：借用、各部分开关，不含 ui 和 displayId', () => {
+  const s = profileSettings();
+  const leased = nvState({ hdr: { enabled: false, middleGrey: 55 } });
+  const p = L.profileFromCurrent(s, leased, { id: 'p1', name: '夜间', now: 123, sites: true, nv: true, lease: { held: true, prevEnabled: true } });
+  assert.equal(p.savedAt, 123);
+  assert.equal(p.behavior.defaultState, 'off');
+  assert.deepEqual(p.behavior.night, { enabled: true, start: '22:00', end: '06:00' });
+  assert.deepEqual(p.sites, { 'a.com': 'on' });
+  assert.deepEqual(p.nv, { hdr: { enabled: true, peak: 1000, middleGrey: 55, contrast: 25, saturation: 0 }, vsr: { mode: 5, priority: 2 }, indicator: false });
+  const json = JSON.stringify(p);
+  assert.ok(!/dev-1|"ui"|"lang"|displayId|followSdr/.test(json), json);
+  const q = L.profileFromCurrent(s, null, { id: 'p2', name: 'x' });
+  assert.ok(!('sites' in q) && !('nv' in q), '不要网站规则和 NVIDIA 部分');
+  // 不知道借用前的值时不存开关；不支持超分、没有指示器时不存
+  const r = L.profileFromCurrent(s, Object.assign(nvState({ vsr: { supported: false } }), { indicator: null, flags: null }), { id: 'p3', name: 'x', nv: true, lease: { held: true } });
+  assert.deepEqual(r.nv, { hdr: { peak: 1000, middleGrey: 65, contrast: 25, saturation: 0 } });
+  assert.equal(L.profileFromCurrent(s, null, { id: 'p4', name: 'x', nv: true }), null, '要 NVIDIA 部分但读不到');
+  assert.equal(L.profileFromCurrent(s, NV_STATE, { id: 'bad id', name: 'x' }), null);
+});
+
+test('profileApply / profileNvPatch / profileDiff', () => {
+  const s = profileSettings();
+  const p = L.profileFromCurrent(s, NV_STATE, { id: 'p1', name: 'x', sites: true, nv: true });
+  assert.deepEqual(L.profileDiff(s, NV_STATE, p), [], '刚保存的配置档与当前一致');
+  const other = S({ eye: { minutes: 10 }, sites: { 'z.com': 'off' }, ui: { lang: 'zh', accent: '#FF7A1A' }, nv: { presets: [preset('p9', 'y')], displayId: 'dev-2' } });
+  const applied = L.profileApply(other, p);
+  for (const k of L.PROFILE_BEHAVIOR_KEYS) assert.deepEqual(applied[k], s[k], k);
+  assert.deepEqual(applied.sites, { 'a.com': 'on' }, '配置档带 sites 时整体替换');
+  assert.deepEqual(applied.ui, other.ui, 'ui 不碰');
+  assert.deepEqual(applied.nv, other.nv, 'nv 不碰');
+  assert.equal(applied.updateCheck, other.updateCheck);
+  const noSites = L.profileFromCurrent(s, null, { id: 'p2', name: 'y' });
+  assert.deepEqual(L.profileApply(other, noSites).sites, other.sites, '不带 sites 时保留');
+  assert.equal(L.profileApply(other, null), null);
+
+  const diff = L.profileDiff(other, nvState({ hdr: { peak: 1500, middleGrey: 50 } }), p);
+  const keys = diff.map((d) => d.key);
+  for (const k of ['defaultState', 'osd', 'night.enabled', 'night.start', 'eye.minutes', 'sites']) assert.ok(keys.includes(k), k + '：' + keys.join());
+  assert.deepEqual(diff.find((d) => d.key === 'sites'), { key: 'sites', from: 1, to: 1 });
+  assert.deepEqual(diff.find((d) => d.key === 'nv.hdr.peak'), { key: 'nv.hdr.peak', from: 1500, to: 1000 });
+  assert.deepEqual(diff.find((d) => d.key === 'nv.hdr.middleGrey'), { key: 'nv.hdr.middleGrey', from: 50, to: 65 });
+  assert.equal(keys.filter((k) => k.indexOf('nv.') === 0).length, 2);
+  assert.ok(L.profileDiff(other, null, p).every((d) => d.key.indexOf('nv.') !== 0), '读不到 NVIDIA 状态时不比较');
+  assert.equal(L.profileDiff(s, NV_STATE, null), null);
+
+  // NVIDIA 部分：同 nvPresetPatch，另外带 indicator
+  assert.deepEqual(L.profileNvPatch(p, nvState({ hdr: { peakMax: 900 } })),
+    { hdr: { enabled: true, peak: 900, middleGrey: 65, contrast: 25, saturation: 0 }, vsr: { mode: 5, priority: 2 }, indicator: false, commit: true });
+  assert.deepEqual(L.profileNvPatch(p, Object.assign(nvState({ hdr: { error: 2 } }), { indicator: null, flags: null })), { vsr: { mode: 5, priority: 2 }, commit: true });
+  assert.deepEqual(L.profileNvPatch(p, nvState({ hdr: { supported: false }, vsr: { supported: false } })), { commit: true, indicator: false });
+  assert.equal(L.profileNvPatch(noSites, NV_STATE), null);
+  assert.equal(L.profileNvPatch(p, null), null);
+});
+
+test('profileUpsert：同名覆盖并保留 id，上限', () => {
+  const mk = (id, name) => ({ id, name, behavior: {} });
+  let r = L.profileUpsert([], mk('a', '电影'));
+  assert.deepEqual([r.overwrote, r.id, r.list.length], [false, 'a', 1]);
+  r = L.profileUpsert(r.list, Object.assign(mk('b', '电影'), { behavior: { osd: false } }));
+  assert.deepEqual([r.overwrote, r.id, r.list.length], [true, 'a', 1]);
+  assert.equal(r.list[0].behavior.osd, false);
+  assert.deepEqual(L.profileUpsert(r.list, mk('a', '别的')), { code: 'invalid' }, 'id 冲突');
+  assert.deepEqual(L.profileUpsert(r.list, null), { code: 'invalid' });
+  const full = [];
+  for (let i = 0; i < 20; i++) full.push(mk('p' + i, 'n' + i));
+  assert.deepEqual(L.profileUpsert(full, mk('new', 'new')), { code: 'max' });
+  assert.equal(L.profileUpsert(full, mk('new', 'n3')).overwrote, true, '满了也能覆盖同名的');
+  assert.equal(full.length, 20, '不修改输入');
+});
+
+test('profilesMerge：换新 id、重名改名且不超过 24 个码点、上限', () => {
+  const mk = (id, name) => ({ id, name, behavior: {} });
+  const long = '一二三四五六七八九十一二三四五六七八九十一二三四';
+  const cur = [mk('a', '电影'), mk('b', long), mk('c', '电影 (2)')];
+  const r = L.profilesMerge(cur, [mk('a', '电影'), mk('zz', long), mk('x', '新的'), { junk: 1 }, 'x'], 1000);
+  assert.equal(r.dropped, 2);
+  assert.deepEqual(r.added.map((a) => [a.name, a.renamed]), [['电影 (3)', true], [long.slice(0, 20) + ' (2)', true], ['新的', false]]);
+  for (const a of r.added) assert.ok(Array.from(a.name).length <= 24, a.name);
+  const ids = r.list.map((p) => p.id);
+  assert.equal(new Set(ids).size, ids.length, 'id 唯一');
+  assert.ok(r.added.every((a) => !['a', 'b', 'c', 'zz', 'x'].includes(a.id)), '导入的全部换新 id');
+  assert.equal(r.list.length, 6);
+  assert.equal(cur.length, 3, '不修改输入');
+  const full = [];
+  for (let i = 0; i < 19; i++) full.push(mk('p' + i, 'n' + i));
+  const m = L.profilesMerge(full, [mk('q1', 'x'), mk('q2', 'y')], 1);
+  assert.equal(m.list.length, L.PROFILES_MAX);
+  assert.equal(m.added.length, 1);
+  assert.equal(m.dropped, 1);
+});
+
+test('配置档文件：导出与检查（invalid / newer / empty）', () => {
+  const f = L.makeProfilesFile([{ id: 'a', name: '电影', behavior: { osd: false } }], '1.3.0', Date.UTC(2026, 9, 22));
+  assert.equal(f.format, 'rtx-hdr-switch-profiles');
+  assert.equal(f.version, 1);
+  assert.equal(f.exportedAt, '2026-10-22T00:00:00.000Z');
+  assert.equal(f.extensionVersion, '1.3.0');
+  const back = L.validateProfilesFile(JSON.parse(JSON.stringify(f)));
+  assert.equal(back.ok, true);
+  assert.deepEqual(back.profiles, f.profiles);
+  assert.deepEqual(L.validateProfilesFile(null), { ok: false, code: 'invalid' });
+  assert.deepEqual(L.validateProfilesFile({ format: L.BACKUP_FORMAT, version: 1, profiles: [] }), { ok: false, code: 'invalid' });
+  assert.deepEqual(L.validateProfilesFile(Object.assign({}, f, { version: 2 })), { ok: false, code: 'newer' });
+  assert.deepEqual(L.validateProfilesFile(Object.assign({}, f, { profiles: 'x' })), { ok: false, code: 'invalid' });
+  assert.deepEqual(L.validateProfilesFile(Object.assign({}, f, { profiles: [{ id: 'a' }] })), { ok: false, code: 'empty' });
+});
+
+test('备份 1.3：带配置档往返，1.2 格式仍能导入', () => {
+  const all = { settings: { osd: false }, profiles: { v: 1, list: [{ id: 'a', name: '电影', behavior: {} }, { bad: 1 }], activeId: 'a' }, 'v:yt:x': { s: 'on', t: 1 } };
+  const b = L.makeBackup(all, '1.3.0', 0);
+  assert.equal(b.version, 1, 'BACKUP_VERSION 不变');
+  assert.equal(b.profiles.list.length, 1);
+  assert.equal(b.profiles.activeId, 'a');
+  const back = L.validateBackup(JSON.parse(JSON.stringify(b)));
+  assert.deepEqual(back.profiles, b.profiles);
+  assert.equal(back.summary.profiles, 1);
+  const old = L.validateBackup({ format: L.BACKUP_FORMAT, version: 1, settings: { defaultState: 'off' }, videos: {} });
+  assert.equal(old.ok, true);
+  assert.equal(old.profiles, null);
+  assert.equal(old.summary.profiles, 0);
+  assert.equal(old.settings.updateCheck, true, '1.2 的设置补上新字段');
+  assert.equal(L.validateBackup(Object.assign({}, b, { profiles: 'x' })).profiles, null, '坏的配置档字段当作没有');
+});
+
+// ---------- 更新检查、本地组件 ----------
+
+test('semverCmp', () => {
+  assert.equal(L.semverCmp('1.10.0', '1.9.0'), 1);
+  assert.equal(L.semverCmp('1.9.0', '1.10.0'), -1);
+  assert.equal(L.semverCmp('v1.3.0', '1.3.0'), 0);
+  assert.equal(L.semverCmp('1.3.0-beta.1', '1.3.0'), -1, '预发布版小于正式版');
+  assert.equal(L.semverCmp('1.3.0', '1.3.0-rc.1'), 1);
+  assert.equal(L.semverCmp('1.3.0-beta.2', '1.3.0-beta.10'), -1);
+  assert.equal(L.semverCmp('1.3.0-alpha', '1.3.0-beta'), -1);
+  assert.equal(L.semverCmp('1.3.0-1', '1.3.0-alpha'), -1, '数字标识小于字母标识');
+  assert.equal(L.semverCmp('1.3.0-beta', '1.3.0-beta.1'), -1);
+  assert.equal(L.semverCmp('2.0.0+build.5', '2.0.0'), 0);
+  for (const bad of ['1.3', '1.3.0.1', 'x', '', null, 5, 'v', '1.3.0-', '1.2.3x']) assert.equal(L.semverCmp(bad, '1.0.0'), null, String(bad));
+});
+
+const REPO = 'https://github.com/miniso7892-dotcom/rtx-hdr-switch/releases/';
+const release = () => ({
+  tag_name: 'v1.4.0', name: 'RTX HDR Switch 1.4.0', draft: false, prerelease: false, published_at: '2026-11-01T00:00:00Z',
+  html_url: REPO + 'tag/v1.4.0',
+  assets: [
+    { name: 'notes.txt', browser_download_url: REPO + 'download/v1.4.0/notes.txt' },
+    { name: 'other.zip', browser_download_url: REPO + 'download/v1.4.0/other.zip' },
+    { name: 'rtx-hdr-switch-1.4.0.zip', browser_download_url: REPO + 'download/v1.4.0/rtx-hdr-switch-1.4.0.zip', digest: 'sha256:' + 'A'.repeat(64) }
+  ]
+});
+
+test('parseRelease：外站链接、zip 选择、prerelease', () => {
+  assert.deepEqual(L.parseRelease(release()), {
+    version: '1.4.0', tag: 'v1.4.0', url: REPO + 'tag/v1.4.0', zip: REPO + 'download/v1.4.0/rtx-hdr-switch-1.4.0.zip',
+    digest: 'sha256:' + 'a'.repeat(64), publishedAt: '2026-11-01T00:00:00Z', name: 'RTX HDR Switch 1.4.0'
+  });
+  const j = release();
+  j.assets = [j.assets[1], { name: 'evil.zip', browser_download_url: 'https://evil.example/x.zip' }];
+  assert.equal(L.parseRelease(j).zip, REPO + 'download/v1.4.0/other.zip', '没有 rtx-hdr-switch 的 zip 时退而求其次');
+  assert.equal(L.parseRelease(j).digest, null);
+  j.assets = [{ name: 'rtx-hdr-switch.zip', browser_download_url: 'https://evil.example/rtx-hdr-switch.zip' }];
+  assert.equal(L.parseRelease(j).zip, null, '外站的 zip 不要');
+  assert.equal(L.parseRelease(Object.assign(release(), { prerelease: true })), null);
+  assert.equal(L.parseRelease(Object.assign(release(), { draft: true })), null);
+  for (const url of ['https://evil.example/releases/tag/v1.4.0', 'https://github.com/someone-else/rtx-hdr-switch/releases/tag/v1.4.0',
+    REPO + '../../../evil', 'http://github.com/miniso7892-dotcom/rtx-hdr-switch/releases/tag/v1.4.0', 'javascript:alert(1)', null]) {
+    assert.equal(L.parseRelease(Object.assign(release(), { html_url: url })), null, String(url));
+  }
+  assert.equal(L.parseRelease(Object.assign(release(), { tag_name: 'latest' })), null);
+  assert.equal(L.parseRelease(null), null);
+});
+
+test('updateBackoff / updateDue / updateNotice', () => {
+  const now = 1e12, H = 3600000;
+  assert.equal(L.updateBackoff(429, { retryAfter: '120' }, 0, now), now + 120000);
+  assert.equal(L.updateBackoff(403, { remaining: '0', reset: String((now + 30 * 60000) / 1000) }, 0, now), now + 30 * 60000);
+  assert.equal(L.updateBackoff(403, {}, 0, now), now + H, '没有限流信息时 1 小时');
+  assert.equal(L.updateBackoff(429, { retryAfter: '1' }, 0, now), now + 60000, '至少 1 分钟');
+  assert.equal(L.updateBackoff(403, { remaining: '0', reset: String(now / 1000 + 3 * 86400) }, 0, now), now + 24 * H, '最多 24 小时');
+  assert.deepEqual([0, 1, 2, 3, 9].map((f) => (L.updateBackoff(503, {}, f, now) - now) / H), [3, 6, 12, 24, 24]);
+  assert.equal(L.updateBackoff(200, {}, 0, now), 0);
+  assert.equal(L.updateBackoff(0, {}, 2, now), 0, '离线不退避');
+
+  assert.equal(L.updateDue(null, now), true);
+  assert.equal(L.updateDue({ checkedAt: now - 23 * H }, now), false);
+  assert.equal(L.updateDue({ checkedAt: now - 24 * H }, now), true);
+  assert.equal(L.updateDue({ checkedAt: now - 48 * H, retryAt: now + 1 }, now), false, '还在退避');
+  assert.equal(L.updateDue({ checkedAt: now + 5 * H }, now), true, '时钟被调回过');
+
+  const st = { latest: { version: '1.4.0', url: REPO + 'tag/v1.4.0', zip: null } };
+  assert.deepEqual(L.updateNotice(st, '1.3.0', now), { version: '1.4.0', url: REPO + 'tag/v1.4.0', zip: null });
+  assert.equal(L.updateNotice(st, '1.4.0', now), null);
+  assert.equal(L.updateNotice(st, '1.5.0', now), null);
+  assert.equal(L.updateNotice(Object.assign({ skipped: '1.4.0' }, st), '1.3.0', now), null);
+  assert.equal(L.updateNotice(Object.assign({ snoozeVersion: '1.4.0', snoozeUntil: now + 1 }, st), '1.3.0', now), null);
+  assert.ok(L.updateNotice(Object.assign({ snoozeVersion: '1.4.0', snoozeUntil: now - 1 }, st), '1.3.0', now), '7 天过了');
+  assert.ok(L.updateNotice(Object.assign({ snoozeVersion: '1.3.5', snoozeUntil: now + 1 }, st), '1.3.0', now), '更新的版本照常提醒');
+  assert.equal(L.updateNotice({ latest: { version: '1.4.0', url: 'https://evil.example/' } }, '1.3.0', now), null);
+  assert.equal(L.updateNotice({}, '1.3.0', now), null);
+});
+
+test('nvHostCheck：1.1、协议、缺 dll、正常', () => {
+  const hello = { ok: true, host: 'rtx_hdr_host', version: '1.2.0', protocol: 1, dll: 'C:\\Program Files\\NVIDIA\\nvcpl.dll', caps: ['display', 'hdrLease'] };
+  assert.deepEqual(L.nvHostCheck(hello), { status: 'ok', version: '1.2.0', missingCaps: [], code: null });
+  const v11 = Object.assign({}, hello, { version: '1.1.0' });
+  delete v11.caps;
+  assert.deepEqual(L.nvHostCheck(v11), { status: 'old', version: '1.1.0', missingCaps: ['display', 'hdrLease'], code: null });
+  assert.deepEqual(L.nvHostCheck(Object.assign({}, hello, { caps: ['display'] })).missingCaps, ['hdrLease']);
+  assert.equal(L.nvHostCheck(Object.assign({}, hello, { protocol: 2 })).status, 'protocol');
+  assert.equal(L.nvHostCheck(Object.assign({}, hello, { dll: null })).status, 'no-dll');
+  assert.equal(L.nvHostCheck({ ok: false, error: { code: 'no-dll' } }).status, 'no-dll');
+  assert.deepEqual(L.nvHostCheck({ ok: false, error: { code: 'host-missing' } }), { status: 'error', version: '', missingCaps: [], code: 'host-missing' });
+  assert.equal(L.nvHostCheck(null).code, 'host-error');
+});
+
+test('diagRedact：去掉网址、域名、视频 key、显示器名和用户名，同一个值同一个编号', () => {
+  const snap = {
+    hello: { ok: true, host: 'rtx_hdr_host', dll: 'C:\\Users\\Alice\\AppData\\Local\\nvcpl.dll' },
+    settings: { sites: { 'secret-site.com': 'on' }, nv: { displayId: '\\\\?\\DISPLAY#SECRETMON#1', sitePresets: { 'secret-site.com': 'p1' } } },
+    frames: {
+      0: { hostname: 'www.secret-site.com', key: 'yt:SECRETKEY', url: 'https://www.secret-site.com/watch?v=SECRETKEY' },
+      3: { hostname: 'embed.other.com', topHostname: 'secret-site.com', key: 'u:https://embed.other.com/x' }
+    },
+    displays: [{ id: '\\\\?\\DISPLAY#SECRETMON#1', name: 'Secret Monitor', hdrEnabled: true }],
+    log: [{ source: 'site', label: 'secret-site.com', ok: true }, { source: 'profile', label: '电影', ok: true }],
+    'v:yt:SECRETKEY': { s: 'on', t: 1 },
+    note: 'see https://www.secret-site.com/a for details'
+  };
+  const before = JSON.stringify(snap);
+  const r = L.diagRedact(snap);
+  const out = JSON.stringify(r);
+  for (const s of ['secret-site', 'SECRETKEY', 'SECRETMON', 'Secret Monitor', 'Alice', 'other.com']) assert.ok(!out.includes(s), s + '：' + out);
+  assert.equal(JSON.stringify(snap), before, '不修改输入');
+  assert.equal(r.frames[0].hostname, r.frames[3].topHostname, '同一个网站同一个编号');
+  assert.equal(r.frames[0].hostname, Object.keys(r.settings.sites)[0]);
+  assert.equal(r.frames[0].url, r.frames[0].hostname, '网址换成它的域名编号');
+  assert.equal(r.log[0].label, r.frames[0].hostname);
+  assert.equal(r.log[1].label, '电影', '配置档名不是网站');
+  assert.equal(r.settings.nv.displayId, r.displays[0].id);
+  assert.match(r.displays[0].name, /^display#\d+$/);
+  assert.equal(r.hello.host, 'rtx_hdr_host');
+  assert.equal(r.hello.dll, '<user>\\AppData\\Local\\nvcpl.dll');
+  assert.equal(r.displays[0].hdrEnabled, true);
+  assert.equal(r.note, 'see ' + r.frames[0].hostname + ' for details');
+  assert.ok(Object.keys(r).includes(r.frames[0].key), 'v:* 键与 key 字段用同一套编号');
+});
+
+// ---------- 观看：决策、按住对比、本标签页沿用、全屏转发 ----------
+
+test('decide 1.3：本标签页沿用', () => {
+  const settings = S({ sites: { 'example.com': 'off' } });
+  const d = (o) => L.decide(Object.assign({ settings, hostname: 'example.com', minutes: NOON, autoState: 'off' }, o));
+  assert.deepEqual(d({ tab: 'on', manual: 'off' }), { state: 'off', reason: 'manual' }, 'manual > tab');
+  assert.deepEqual(d({ tab: 'on', manual: { state: 'off', reason: 'eye' } }), { state: 'off', reason: 'eye' }, '护眼 > tab');
+  assert.deepEqual(d({ tab: 'on', saved: { s: 'off', t: 1 } }), { state: 'on', reason: 'tab' }, 'tab > video');
+  assert.deepEqual(d({ tab: 'on' }), { state: 'on', reason: 'tab' }, 'tab > site');
+  assert.deepEqual(d({ tab: 'off', fullscreen: true }), { state: 'off', reason: 'tab' });
+  for (const bad of ['yes', true, 1, { state: 'on' }, null]) assert.equal(d({ tab: bad }).reason, 'site', JSON.stringify(bad));
+});
+
+test('decide 1.3：仅全屏', () => {
+  const fsDef = S({ defaultState: 'fullscreen' });
+  const d = (s, o) => L.decide(Object.assign({ settings: s, hostname: 'a.com', minutes: NOON }, o));
+  assert.deepEqual(d(fsDef, { fullscreen: true }), { state: 'on', reason: 'fullscreen' });
+  assert.deepEqual(d(fsDef, { fullscreen: false }), { state: 'off', reason: 'fullscreen' });
+  assert.deepEqual(d(fsDef, {}), { state: 'off', reason: 'fullscreen' }, '缺省按不全屏');
+  assert.equal(d(fsDef, { fullscreen: 'yes' }).state, 'off');
+  // 夜间、白底检测压过默认级的仅全屏
+  const night = S({ defaultState: 'fullscreen', night: { enabled: true, start: '23:00', end: '07:00' } });
+  assert.deepEqual(d(night, { fullscreen: true, minutes: 0 }), { state: 'off', reason: 'night' });
+  assert.deepEqual(d(fsDef, { fullscreen: true, autoState: 'off' }), { state: 'off', reason: 'auto' });
+  // 网站规则的仅全屏：全屏时开、reason 是 site，并压过夜间
+  const site = S({ sites: { 'a.com': 'fullscreen' }, night: { enabled: true, start: '23:00', end: '07:00' } });
+  assert.deepEqual(d(site, { fullscreen: true, minutes: 0 }), { state: 'on', reason: 'site' });
+  assert.deepEqual(d(site, { fullscreen: false, minutes: 0 }), { state: 'off', reason: 'site' });
+  // 记住的视频、本标签页沿用压过网站规则的仅全屏
+  assert.deepEqual(d(site, { saved: { s: 'on', t: 1 } }), { state: 'on', reason: 'video' });
+  assert.deepEqual(d(site, { tab: 'on' }), { state: 'on', reason: 'tab' });
+  // 顶层页面的规则优先于 iframe 自身域名的
+  const both = S({ sites: { 'blog.example': 'fullscreen', 'a.com': 'on' } });
+  assert.deepEqual(d(both, { topHostname: 'blog.example' }), { state: 'off', reason: 'site' });
+});
+
+test('文案 1.3：本标签页沿用、仅全屏', () => {
+  assert.equal(L.reasonText('tab'), '本标签页沿用');
+  assert.equal(L.reasonText('fullscreen'), '仅全屏');
+  assert.equal(L.reasonText('tab', 'en'), 'kept for this tab');
+  assert.equal(L.reasonText('fullscreen', 'en'), 'fullscreen only');
+  assert.equal(L.osdText('on', 'tab'), 'RTX HDR：开（本标签页沿用）');
+  assert.equal(L.osdText('off', 'fullscreen'), 'RTX HDR：关（仅全屏）');
+  assert.equal(L.osdText('on', 'tab', 'en'), 'RTX HDR: on (kept for this tab)');
+  assert.equal(L.osdText('on', 'fullscreen', 'en'), 'RTX HDR: on (fullscreen only)');
+});
+
+test('createHoldGesture：短按、按住、重复调用', () => {
+  assert.equal(L.PEEK_HOLD_MS, 300);
+  const g = L.createHoldGesture(L.PEEK_HOLD_MS);
+  assert.equal(g.down(1000), 'down');
+  assert.equal(g.due(1299), null, '没到阈值');
+  assert.equal(g.up(1299), 'tap');
+  assert.equal(g.pressed, false);
+  assert.equal(g.down(2000), 'down');
+  assert.equal(g.down(2100), null, '已经按下时忽略');
+  assert.equal(g.due(2300), 'hold', '从第一次按下算起');
+  assert.equal(g.due(2400), null, '只返回一次');
+  assert.equal(g.held, true);
+  assert.equal(g.up(2500), 'release');
+  assert.equal(g.up(2600), null, '没按下时松开');
+  g.down(3000);
+  assert.equal(g.cancel(), null, '按住前取消');
+  assert.equal(g.due(3500), null, '取消之后不会再进入按住');
+  g.down(4000);
+  g.due(4300);
+  assert.equal(g.cancel(), 'release', '按住后取消');
+  assert.equal(g.cancel(), null);
+  assert.equal(L.createHoldGesture().holdMs, 300, '默认 300 ms');
+});
+
+test('tabOffer：只在下一个视频重复同样的操作时提议', () => {
+  assert.equal(L.tabOffer({ key: 'yt:a', state: 'off' }, 'yt:b', 'off', null), true);
+  assert.equal(L.tabOffer({ key: 'yt:b', state: 'off' }, 'yt:b', 'off', null), false, '同一个视频');
+  assert.equal(L.tabOffer({ key: 'yt:a', state: 'on' }, 'yt:b', 'off', null), false, '状态不同');
+  assert.equal(L.tabOffer({ key: 'yt:a', state: 'off' }, 'yt:b', 'off', { state: 'off', at: 1 }), false, '已在沿用');
+  assert.equal(L.tabOffer(null, 'yt:b', 'off', null), false, '上一次为空');
+  assert.equal(L.tabOffer({ key: 'yt:a', state: 'off' }, '', 'off', null), false);
+  assert.equal(L.tabOffer({ key: 'yt:a', state: 'x' }, 'yt:b', 'x', null), false);
+});
+
+test('fsHintTarget：父页面把 iframe 设为全屏时通知哪个子 frame', () => {
+  const now = 100000;
+  const top = { hasVideo: false, ts: now, fsFrame: true };
+  const F = (frames, childMax) => L.fsHintTarget(frames, now, 10000, childMax === undefined ? 10000 : childMax);
+  assert.equal(F({ 0: Object.assign({}, top, { fsFrame: false }), 3: { hasVideo: true, ts: now } }), -1, '顶层没有 fsFrame');
+  assert.equal(F({ 0: top, 3: { hasVideo: true, ts: now } }), 3);
+  assert.equal(F({ 0: top, 3: { hasVideo: true, ts: now }, 5: { hasVideo: true, ts: now, fullscreen: true } }), -1, '子 frame 自己全屏');
+  assert.equal(F({ 0: top, 5: { hasVideo: true, ts: now - 60000, fullscreen: true }, 3: { hasVideo: true, ts: now } }, 0), 3, '过期子 frame 的全屏不算');
+  assert.equal(F({ 0: top, 3: { hasVideo: true, ts: now - 20000 } }), -1, '子 frame 已消失');
+  assert.equal(F({ 0: top, 3: { hasVideo: true, playing: false, area: 9000, ts: now }, 4: { hasVideo: true, playing: true, area: 100, ts: now },
+    6: { hasVideo: true, playing: true, area: 500, ts: now } }), 6, '在播放的优先，再比面积');
+  assert.equal(F({ 0: Object.assign({}, top, { hasVideo: true, playing: true, area: 9e9 }) }), -1, '不会选顶层自己');
+  assert.equal(F(null), -1);
+});
+
+// ---------- 播放器面板 ----------
+
+test('placeAbove：按钮上方居中、左右夹边、空间不足时缩小高度', () => {
+  const root = { left: 0, top: 0, width: 800, height: 450 };
+  const btn = { left: 700, top: 400, width: 40, height: 40 };
+  assert.deepEqual(L.placeAbove(btn, root, 320, 200, 22, 8), { x: 472, y: 178, h: 200 }, '右边夹到 800 - 8 - 320');
+  assert.deepEqual(L.placeAbove({ left: 10, top: 400, width: 40, height: 40 }, root, 320, 200, 22, 8), { x: 8, y: 178, h: 200 }, '左边夹到 8');
+  assert.deepEqual(L.placeAbove({ left: 380, top: 400, width: 40, height: 40 }, root, 320, 200, 22, 8), { x: 240, y: 178, h: 200 }, '居中');
+  assert.deepEqual(L.placeAbove(btn, root, 320, 500, 22, 8), { x: 472, y: 8, h: 370 }, '高度夹到按钮上方的可用空间');
+  assert.deepEqual(L.placeAbove(btn, { left: 100, top: 50, width: 800, height: 450 }, 320, 500, 22, 8), { x: 560, y: 58, h: 320 });
+  assert.equal(L.placeAbove(null, root, 320, 200, 22, 8), null);
+  assert.equal(L.placeAbove(btn, root, 0, 200, 22, 8), null);
+  assert.equal(L.placeAbove({ left: 'x', top: 0, width: 1, height: 1 }, root, 1, 1, 0, 0), null);
+});
+
+test('PLAYER_HOSTS 与 playerSite 一致', () => {
+  assert.ok(Object.isFrozen(L.PLAYER_HOSTS));
+  for (const [h, site] of Object.entries(L.PLAYER_HOSTS)) assert.equal(L.playerSite(h, '/watch'), site, h);
+  assert.deepEqual(Array.from(new Set(Object.values(L.PLAYER_HOSTS))).sort(), ['bilibili', 'tencent', 'twitch', 'youtube']);
+  assert.equal(L.playerSite('www.youtube.com', '/embed/x'), null, '嵌入播放器仍然排除');
+  assert.equal(L.playerSite('toString'), null, '原型上的键不算');
+});
+
+// ---------- 1.3 结构测试 ----------
+
+test('i18n：界面文字不含「·」', () => {
+  const I = require('../i18n.js');
+  for (const lang of ['zh', 'en']) for (const [k, v] of Object.entries(I.DICT[lang])) assert.ok(!v.includes('\u00b7'), lang + ' ' + k + '：' + v);
+  for (const loc of ['en', 'zh_CN']) {
+    const msgs = JSON.parse(fs.readFileSync(path.join(ROOT, '_locales', loc, 'messages.json'), 'utf8'));
+    for (const [k, v] of Object.entries(msgs)) assert.ok(!v.message.includes('\u00b7'), loc + ' ' + k);
+  }
+  // 页面脚本去掉注释后的源码（字符串字面量、拼接的分隔符），以及所有 HTML（没有 data-i18n 的静态文字）
+  const scripts = fs.readdirSync(ROOT).filter((f) => /\.js$/.test(f));
+  assert.ok(['lib.js', 'popup.js', 'options.js', 'content.js', 'background.js'].every((f) => scripts.indexOf(f) >= 0), scripts.join());
+  for (const f of scripts) {
+    const src = fs.readFileSync(path.join(ROOT, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    assert.ok(!src.includes('\u00b7'), f);
+  }
+  for (const f of fs.readdirSync(ROOT).filter((x) => /\.html$/.test(x))) {
+    const html = fs.readFileSync(path.join(ROOT, f), 'utf8').replace(/<!--[\s\S]*?-->/g, '');
+    assert.ok(!html.includes('\u00b7'), f);
+  }
+});
+
+test('i18n：动态拼出的键都存在（修改记录来源、字段、更新和配置档的错误码、面板打开方式）', () => {
+  const I = require('../i18n.js');
+  const keys = new Set(Object.keys(I.DICT.zh));
+  for (const s of L.NV_SOURCES) assert.ok(keys.has('nv.source.' + s), s);
+  for (const f of L.NV_FIELDS) assert.ok(keys.has('nv.field.' + f), f);
+  for (const c of ['offline', 'rate', 'http', 'invalid', 'timeout']) assert.ok(keys.has('update.err.' + c), c);
+  for (const c of ['invalid', 'newer', 'empty', 'max', 'exists', 'nv-unavailable', 'not-found', 'expired', 'name']) assert.ok(keys.has('profile.err.' + c), c);
+  for (const r of Object.keys(L.REASON_TEXT)) assert.ok(keys.has('reason.' + r), r);
+  for (const m of L.PANEL_MODES) assert.ok(keys.has('rules.panel' + m[0].toUpperCase() + m.slice(1)), m);
+});
+
+test('manifest：每个命令都有 cmd.* 文案和两种语言的 _locales 说明，预设快捷键不超过 4 个', () => {
+  const I = require('../i18n.js');
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+  const locales = ['en', 'zh_CN'].map((loc) => JSON.parse(fs.readFileSync(path.join(ROOT, '_locales', loc, 'messages.json'), 'utf8')));
+  for (const [name, c] of Object.entries(manifest.commands)) {
+    for (const lang of ['zh', 'en']) assert.ok(I.DICT[lang]['cmd.' + name], lang + ' cmd.' + name);
+    const m = /^__MSG_(\w+)__$/.exec(c.description || '');
+    assert.ok(m, name + ' 的说明走 _locales');
+    for (const msgs of locales) assert.ok(msgs[m[1]] && msgs[m[1]].message, m[1]);
+  }
+  for (const k of ['cmdPeek', 'cmdNextProfile', 'cmdNvUndo']) for (const msgs of locales) assert.ok(msgs[k], k);
+  assert.ok(Object.values(manifest.commands).filter((c) => c.suggested_key).length <= 4);
+});
+
+test('content.js 报告里的字段都经过 background 的 sanitizeReport', () => {
+  const content = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+  const bg = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  const body = /function buildReport\(\) \{[\s\S]*?\n {2}\}/.exec(content);
+  assert.ok(body, '找到 buildReport');
+  const m = /const r = \{([\s\S]*?)\n {4}\};/.exec(body[0]);
+  assert.ok(m, '找到 buildReport 里的 r');
+  const fields = Array.from(m[1].matchAll(/^ {6}(\w+):/gm), (x) => x[1]).filter((f) => f !== 'type');
+  assert.ok(fields.length > 10, fields.join());
+  // 字面量之后补上的字段（比如只由顶层 frame 发的）同样要经过 sanitizeReport
+  const later = Array.from(body[0].matchAll(/\br\.(\w+)\s*=(?!=)/g), (x) => x[1]);
+  assert.ok(later.indexOf('timeOrigin') >= 0, '扫得到字面量之后补上的字段');
+  // background 在 sanitizeReport 之外单独读的字段：handleReport 用 timeOrigin 识别顶层文档
+  const OUTSIDE = ['timeOrigin'];
+  for (const f of OUTSIDE) assert.ok(new RegExp('\\bmsg\\.' + f + '\\b').test(bg), 'background 读取 ' + f);
+  const s = /function sanitizeReport\([\s\S]*?\n\}/.exec(bg);
+  assert.ok(s, '找到 sanitizeReport');
+  for (const f of fields.concat(later)) {
+    if (OUTSIDE.indexOf(f) >= 0) continue;
+    assert.ok(new RegExp('\\bmsg\\.' + f + '\\b').test(s[0]), 'sanitizeReport 缺少 ' + f);
   }
 });
 
