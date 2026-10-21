@@ -1,2 +1,5 @@
 * text=auto eol=lf
 *.png binary
+
+# keep the release source zip lean: README images and demo only live on GitHub
+docs/ export-ignore
