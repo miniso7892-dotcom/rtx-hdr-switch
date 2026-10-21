@@ -1219,7 +1219,7 @@ test('manifest.json 合法且引用的文件都存在', () => {
   assert.equal(manifest.default_locale, 'en');
   assert.ok(manifest.name.length <= 75, 'name 不超过 75 字符');
   assert.equal(new URL(manifest.homepage_url).protocol, 'https:', 'homepage_url 是合法的 https 网址');
-  assert.equal(manifest.version, '1.2.0');
+  assert.equal(manifest.version, '1.2.1');
   assert.equal(manifest.minimum_chrome_version, '120'); // chrome.alarms 30 秒周期
   assert.deepEqual(manifest.permissions.slice().sort(), ['alarms', 'nativeMessaging', 'scripting', 'storage', 'tabs']);
   assert.deepEqual(manifest.host_permissions, ['<all_urls>']);

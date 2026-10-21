@@ -17,7 +17,8 @@ const HOST_DIR = path.join(HERE, '..');
 const ROOT = path.join(HOST_DIR, '..');
 const EXE = path.join(HOST_DIR, 'rtx_hdr_host.exe');
 const HOST_MANIFEST = path.join(HOST_DIR, 'io.github.rtx_hdr_switch.json');
-const EXT_ID = 'omgekmljdifpghaimigdbbbcmnjddmdd';
+const EXT_ID = 'omgekmljdifpghaimigdbbbcmnjddmdd';   // 加载仓库文件夹：由 manifest.json 的 key 固定
+const STORE_ID = 'ngpglblkbhffcikcbkodlmgbaaojgmpp'; // Chrome 应用商店版：商店包不带 key，ID 由商店分配
 const ORIGIN = `chrome-extension://${EXT_ID}/`;
 const LIVE = process.argv.includes('--live');
 // NVIDIA 的调试日志：每次 NvCplApiSetSetting 都会记一行，用来证明只读测试真的没写
@@ -226,7 +227,7 @@ test('host 清单：名称、路径、来源与扩展 key 一致', () => {
   assert.equal(m.type, 'stdio');
   assert.equal(m.path, 'rtx_hdr_host.exe');
   assert.ok(fs.existsSync(path.join(HOST_DIR, m.path)), 'path 相对清单目录存在');
-  assert.deepEqual(m.allowed_origins, [ORIGIN]);
+  assert.deepEqual(m.allowed_origins, [ORIGIN, `chrome-extension://${STORE_ID}/`]);
   const ext = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
   if (ext.key) { // 扩展 ID = sha256(DER 公钥) 前 16 字节，0-f 映射到 a-p
     const hex = crypto.createHash('sha256').update(Buffer.from(ext.key, 'base64')).digest('hex').slice(0, 32);
@@ -259,7 +260,7 @@ test('hello 形状', async () => {
   assert.equal(r.ok, true);
   assert.equal(r.id, 7);
   assert.equal(r.host, 'rtx_hdr_host');
-  assert.equal(r.version, '1.2.0');
+  assert.equal(r.version, '1.2.1');
   assert.equal(r.protocol, 1, '协议号不变：1.1 的扩展照常可用');
   assert.deepEqual(r.caps, ['display', 'hdrLease'], 'caps：1.2 新增的命令');
   assert.ok(r.dll === null || /nvcpl\.dll$/i.test(r.dll), 'dll');

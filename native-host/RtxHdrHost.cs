@@ -18,8 +18,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("rtx_hdr_host")]
 [assembly: AssemblyDescription("RTX HDR Switch native host (NVIDIA RTX Video settings)")]
 [assembly: AssemblyProduct("RTX HDR Switch")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyFileVersion("1.2.1.0")]
 
 // 返回给扩展的错误：{ code, message, ...额外字段 }
 sealed class HostError : Exception
@@ -376,7 +376,7 @@ static class Disp
 
 static class Host
 {
-    public const string Version = "1.2.0";
+    public const string Version = "1.2.1";
     const int MaxIn = 64 * 1024 * 1024;   // 浏览器→本地 的安全上限
     const int MaxOut = 1024 * 1024;       // 本地→浏览器 超过 1 MiB 浏览器会断开
     const int FlagIndicators = 0x101;     // HDR 指示器 | 超分指示器

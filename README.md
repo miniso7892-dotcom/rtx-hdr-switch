@@ -205,11 +205,11 @@ With this on (Rules tab), videos that should be SDR no longer get the filter (th
 
 A browser extension can't call NVIDIA's settings interface directly, so these features talk to a small helper program (a native messaging host) in the `native-host` folder. Without it the NVIDIA tab says the local helper isn't installed and the rest of the extension works as before.
 
-1. Install the extension from this folder (see [Installation](#installation)). Load the folder as it is: the `key` in `manifest.json` fixes the extension ID to `omgekmljdifpghaimigdbbbcmnjddmdd`, and the helper only accepts that ID.
-2. Double-click `native-host\install.cmd`. It builds `rtx_hdr_host.exe` with the C# compiler that comes with Windows (.NET Framework 4.x) and registers it for Chrome, Edge and Chromium for the current user (`HKCU`). No admin rights are needed.
+1. Install the extension: load this folder as it is (see [Installation](#installation)), or install it from the Chrome Web Store. The helper accepts these two extension IDs: `omgekmljdifpghaimigdbbbcmnjddmdd` for the loaded folder (fixed by the `key` in `manifest.json`) and `ngpglblkbhffcikcbkodlmgbaaojgmpp` for the Chrome Web Store version. A copy without the `key` or a repacked build gets a different ID, and the helper rejects it.
+2. Double-click `native-host\install.cmd`. It builds `rtx_hdr_host.exe` with the C# compiler that comes with Windows (.NET Framework 4.x) and registers it for Chrome, Edge and Chromium for the current user (`HKCU`). No admin rights are needed. The Chrome Web Store version doesn't include the helper: download the ZIP from the [latest release](https://github.com/miniso7892-dotcom/rtx-hdr-switch/releases/latest), extract it to a folder you'll keep, and run `native-host\install.cmd` from there.
 3. Close and reopen the popup. The NVIDIA tab should now show the current values.
 
-Requirements: Windows 10/11 (x64) and NVIDIA App, whose `nvcpl.dll` the helper uses. Keep the folder on a path without `&`, `^` or `%`: the browser starts the helper through `cmd.exe`, which breaks on these characters. After updating from 1.1 to 1.2, run `install.cmd` again: SDR sync and *Turn off HDR only* need the 1.2 helper. The protocol is documented in [native-host/README.md](native-host/README.md).
+Requirements: Windows 10/11 (x64) and NVIDIA App, whose `nvcpl.dll` the helper uses. Keep the folder on a path without `&`, `^` or `%`: the browser starts the helper through `cmd.exe`, which breaks on these characters. After updating from 1.1 to 1.2, run `install.cmd` again: SDR sync and *Turn off HDR only* need the 1.2 helper. The Chrome Web Store version needs the 1.2.1 helper or newer. The protocol is documented in [native-host/README.md](native-host/README.md).
 
 To uninstall, double-click `native-host\uninstall.cmd` (it removes the registry entries), then delete the folder. If you move the folder, run `install.cmd` again.
 
@@ -245,7 +245,7 @@ To uninstall, double-click `native-host\uninstall.cmd` (it removes the registry 
 | Extension stops working / "could not load" | Check that the `rtx-hdr-switch` folder hasn't been moved or deleted. |
 | NVIDIA tab says the local helper isn't installed | Run `native-host\install.cmd` (see [Install the local helper](#install-the-local-helper)), then reopen the popup. Run it again after moving the folder. |
 | NVIDIA tab says the local helper is out of date, or *Turn off HDR only* doesn't apply | Run `native-host\install.cmd` again to update to 1.2. |
-| NVIDIA tab says the helper only accepts this extension as loaded from the repository folder | The extension ID doesn't match. Load this folder unpacked as it is. Running `install.cmd` again doesn't help. |
+| NVIDIA tab says the local helper doesn't accept this extension's ID | Chrome Web Store version: the installed helper is older than 1.2.1. Run `native-host\install.cmd` from the [latest release](https://github.com/miniso7892-dotcom/rtx-hdr-switch/releases/latest). Loaded folder: load this folder unpacked as it is, without removing the `key`; running `install.cmd` again doesn't help. |
 | NVIDIA tab says NVIDIA App (nvcpl.dll) wasn't found | Install NVIDIA App. |
 | NVIDIA App still shows the old values | Leave NVIDIA App's Video page and open it again (see [Good to know](#good-to-know)). |
 

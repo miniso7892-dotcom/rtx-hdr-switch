@@ -961,7 +961,7 @@
   function nvErrorText(err, lang) {
     const e = isObj(err) ? err : { code: err };
     switch (e.code) {
-      // host-forbidden 只在扩展 ID 不在本地组件清单的 allowed_origins 里时出现，重新运行 install.cmd 解决不了
+      // host-forbidden 只在扩展 ID 不在本地组件清单的 allowed_origins 里时出现：商店版换 1.2.1 起的本地组件能解决，其他 ID 重新运行 install.cmd 也没用
       case 'host-missing':
       case 'host-forbidden':
       case 'host-exit':

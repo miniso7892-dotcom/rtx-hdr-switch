@@ -18,6 +18,15 @@ It needs no admin rights and makes no network access.
 
 Close the extension popup before rebuilding. A running host keeps the exe locked.
 
+`allowed_origins` in `io.github.rtx_hdr_switch.json` lists the two extension IDs the browser lets start the host:
+
+| ID | Build |
+|---|---|
+| `omgekmljdifpghaimigdbbbcmnjddmdd` | The repository folder loaded unpacked. The `key` in `manifest.json` fixes this ID. |
+| `ngpglblkbhffcikcbkodlmgbaaojgmpp` | The Chrome Web Store build (packaged without `key`; the store assigns the ID). |
+
+The browser checks this list and the host itself does not. Any other ID (a copy without `key`, a repacked build, another store) gets "forbidden" from the browser. Helpers before 1.2.1 list only the first ID.
+
 ## Framing
 
 - Each message is a 4-byte little-endian length followed by UTF-8 JSON with no BOM. Requests are answered one at a time, in order.
@@ -31,7 +40,7 @@ Close the extension popup before rebuilding. A running host keeps the exe locked
 
 ```json
 {"cmd":"hello"}
-→ {"ok":true,"host":"rtx_hdr_host","version":"1.2.0","protocol":1,"dll":"C:\\…\\nvcpl.dll","caps":["display","hdrLease"]}
+→ {"ok":true,"host":"rtx_hdr_host","version":"1.2.1","protocol":1,"dll":"C:\\…\\nvcpl.dll","caps":["display","hdrLease"]}
 ```
 
 - `dll` is `null` if `nvcpl.dll` was not found.

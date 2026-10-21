@@ -195,11 +195,11 @@ YouTube 小窗、Twitch 迷你播放器：从视频页跳到首页、目录等�
 
 扩展本身没法调用 NVIDIA 的设置接口，所以这些功能通过 `native-host` 文件夹里的一个小程序（本地组件，native messaging host）来读写。没装时 NVIDIA 页签显示「未安装本地组件，无法读写 NVIDIA 设置。」，扩展的其他功能照常使用。
 
-1. 先按上面的「安装」用这个文件夹加载扩展。请原样加载：`manifest.json` 里的 `key` 把扩展 ID 固定为 `omgekmljdifpghaimigdbbbcmnjddmdd`，本地组件只接受这个 ID。
-2. 双击 `native-host\install.cmd`。它用 Windows 自带的 C# 编译器（.NET Framework 4.x）编译出 `rtx_hdr_host.exe`，再为 Chrome、Edge、Chromium 注册本地组件（只写当前用户的 `HKCU`，不需要管理员权限）。
+1. 安装扩展：按上面的「安装」原样加载这个文件夹，或者从 Chrome 应用商店安装。本地组件接受这两种安装方式的扩展 ID：加载文件夹时为 `omgekmljdifpghaimigdbbbcmnjddmdd`（由 `manifest.json` 里的 `key` 固定），Chrome 应用商店版为 `ngpglblkbhffcikcbkodlmgbaaojgmpp`。删掉 `key` 的副本或重新打包的扩展 ID 不同，本地组件不接受。
+2. 双击 `native-host\install.cmd`。它用 Windows 自带的 C# 编译器（.NET Framework 4.x）编译出 `rtx_hdr_host.exe`，再为 Chrome、Edge、Chromium 注册本地组件（只写当前用户的 `HKCU`，不需要管理员权限）。Chrome 应用商店版不带本地组件：请在[最新发布页](https://github.com/miniso7892-dotcom/rtx-hdr-switch/releases/latest)下载 ZIP，解压到一个长期保留的文件夹，再运行其中的 `native-host\install.cmd`。
 3. 关掉弹窗再打开，NVIDIA 页签应显示当前的参数。
 
-要求：Windows 10/11（64 位）和 NVIDIA App（本地组件调用它的 `nvcpl.dll`）。文件夹路径里不要有 `&`、`^`、`%`：浏览器通过 `cmd.exe` 启动本地组件，路径里有这些字符会出错。从 1.1 升级到 1.2 后请重新运行一次 `install.cmd`，SDR 亮度同步和「只关 HDR」需要 1.2 的本地组件。协议说明见 [native-host/README.md](native-host/README.md)。
+要求：Windows 10/11（64 位）和 NVIDIA App（本地组件调用它的 `nvcpl.dll`）。文件夹路径里不要有 `&`、`^`、`%`：浏览器通过 `cmd.exe` 启动本地组件，路径里有这些字符会出错。从 1.1 升级到 1.2 后请重新运行一次 `install.cmd`，SDR 亮度同步和「只关 HDR」需要 1.2 的本地组件。Chrome 应用商店版需要 1.2.1 及以上的本地组件。协议说明见 [native-host/README.md](native-host/README.md)。
 
 卸载：双击 `native-host\uninstall.cmd`（删除注册表项），再删除文件夹。移动文件夹后要重新运行一次 `install.cmd`。
 
@@ -239,7 +239,7 @@ YouTube 小窗、Twitch 迷你播放器：从视频页跳到首页、目录等�
 | 更新扩展后页面行为异常 | 刷新页面。 |
 | NVIDIA 页签显示「未安装本地组件，无法读写 NVIDIA 设置。」 | 运行 `native-host\install.cmd`（见 [安装本地组件](#安装本地组件)），再重新打开弹窗。移动过文件夹也要重新运行。 |
 | NVIDIA 页签显示「本地组件版本较旧……」或「只关 HDR」不生效 | 重新运行 `native-host\install.cmd` 更新到 1.2。 |
-| NVIDIA 页签显示「本地组件只接受仓库里这份扩展……」 | 扩展 ID 不对：请用仓库文件夹原样以「加载已解压的扩展程序」方式安装。重新运行 `install.cmd` 解决不了。 |
+| NVIDIA 页签显示「本地组件不接受这个扩展的 ID……」 | Chrome 应用商店版：装的本地组件早于 1.2.1，请从[最新发布页](https://github.com/miniso7892-dotcom/rtx-hdr-switch/releases/latest)下载并运行 `native-host\install.cmd`。加载文件夹的：请用仓库文件夹原样以「加载已解压的扩展程序」方式安装，不要删掉 `key`；这种情况重新运行 `install.cmd` 解决不了。 |
 | NVIDIA 页签显示「未找到 NVIDIA App（nvcpl.dll）」 | 安装 NVIDIA App。 |
 | NVIDIA App 里还是旧的数值 | 离开再进入 NVIDIA App 的「视频」页（见 [注意事项](#注意事项)）。 |
 
