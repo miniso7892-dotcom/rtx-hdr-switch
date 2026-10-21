@@ -9,7 +9,7 @@
   let uiLanguage = '';
   try { uiLanguage = chrome.i18n.getUILanguage(); } catch (e) { uiLanguage = navigator.language || ''; }
   let lang = 'zh';
-  let pending = null; // 通过检查、等确认的备份
+  let pending = null; // 通过检查、等确认的备份：{data: 文件里的原始对象, res: L.validateBackup 的结果}
   const t = (key, params) => I.t(lang, key, params);
 
   function applyI18n(settings) {
@@ -59,10 +59,11 @@
     message('export-msg', t('backup.exported', { file: name }));
   }
 
-  function showPreview(res) {
-    pending = res;
+  function showPreview(data, res) {
+    pending = { data: data, res: res };
     $('preview').hidden = false;
-    $('preview-summary').textContent = t('backup.summary', res.summary);
+    // 备份里有配置档时导入会整体替换现有的配置档：摘要里写出数量
+    $('preview-summary').textContent = t(res.profiles ? 'backup.summaryProfiles' : 'backup.summary', res.summary);
     let date = res.exportedAt;
     const d = new Date(res.exportedAt);
     if (!isNaN(d.getTime())) date = d.toLocaleString(lang === 'zh' ? 'zh-CN' : 'en');
@@ -84,27 +85,28 @@
         message('import-msg', t(res.code === 'newer' ? 'backup.newer' : 'backup.invalid'), true);
         return;
       }
-      showPreview(res);
+      showPreview(obj, res);
     }, () => message('import-msg', t('backup.readError'), true));
   }
 
-  // 覆盖：先删掉现有的视频记忆，再写入备份里的设置和记忆；时段记录清掉，让定时切换按新预设重新判断
+  // 覆盖：设置只由 background 写，交给它再检查一遍后整体覆盖（先删掉现有的视频记忆，再写入备份里的设置和记忆；
+  // 时段记录清掉，让定时切换按新预设重新判断）
   async function doImport() {
-    const res = pending;
-    if (!res) return;
+    const p = pending;
+    if (!p) return;
     $('btn-confirm').disabled = true;
     try {
-      const all = await chrome.storage.local.get(null);
-      const old = Object.keys(all).filter((k) => k.indexOf(L.VIDEO_PREFIX) === 0);
-      old.push('nvLastPhase', 'nvLastSdrWhite');
-      await chrome.storage.local.remove(old);
-      const items = { settings: res.settings };
-      for (const k of Object.keys(res.videos)) items[L.VIDEO_PREFIX + k] = res.videos[k];
-      await chrome.storage.local.set(items);
+      const r = await chrome.runtime.sendMessage({ type: 'backup', op: 'import', data: p.data });
+      if (!r || r.ok !== true) {
+        const code = (r && r.code) || 'error';
+        if (code === 'invalid' || code === 'newer') message('import-msg', t(code === 'newer' ? 'backup.newer' : 'backup.invalid'), true);
+        else message('import-msg', t('backup.failed', { err: (r && r.message) || code }), true);
+        return;
+      }
       pending = null;
       $('preview').hidden = true;
       $('file').value = '';
-      applyI18n(res.settings);
+      applyI18n(L.mergeSettings(r.settings));
       message('import-msg', t('backup.done'));
     } catch (e) {
       message('import-msg', t('backup.failed', { err: (e && e.message) || '' }), true);

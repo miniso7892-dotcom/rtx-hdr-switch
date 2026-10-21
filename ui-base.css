@@ -1,0 +1,288 @@
+/* RTX HDR 开关 —— 共用的设计变量和控件样式（弹窗、播放器面板；黑白高反差 + 一个主题色） */
+
+:root {
+  --ink: #0A0A0A;
+  --paper: #FAFAFA;
+  --muted: #4A4A4A;
+  --rule: #0A0A0A;
+  --soft: #DADADA;
+  --bar: #0A0A0A;
+  --bar-fg: #FAFAFA;
+  --bar-muted: #C9C9C9;
+  --bar-line: #333333;
+  --warn: #A33A00;
+  --drm: #6B6B6B;
+  --sdr-bg: #0A0A0A;
+  --sdr-fg: #FAFAFA;
+  /* 主题色由页面脚本按设置写进来（RtxHdrUi.applyTheme） */
+  --accent: #A98BFF;
+  --on-accent: #0A0A0A;
+  --accent-fg: #A98BFF;
+  --f-cjk: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --f-ui: "Archivo", var(--f-cjk);
+  --f-num: "Anton", "Impact", "Arial Narrow", var(--f-cjk);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #F2F2F2;
+    --paper: #111111;
+    --muted: #A3A3A3;
+    --rule: #3A3A3A;
+    --soft: #333333;
+    --bar: #000000;
+    --warn: #FFB37A;
+    /* 深色模式下 SDR 状态不要一大块亮白 */
+    --sdr-bg: #2A2A2A;
+    --sdr-fg: #F2F2F2;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+[hidden] { display: none !important; }
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+button, input, select { font: inherit; color: inherit; }
+
+:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+/* ---------- 分段按钮 ---------- */
+
+.seg {
+  display: inline-flex;
+  flex: none;
+  border: 2px solid var(--ink);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.seg label { position: relative; display: block; cursor: pointer; }
+
+.seg label + label { border-left: 2px solid var(--ink); }
+
+.seg input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+
+.seg span { display: block; padding: 2px 10px; white-space: nowrap; }
+
+.seg input:checked + span { background: var(--ink); color: var(--paper); }
+
+.seg input:focus-visible + span { outline: 3px solid var(--accent-fg); outline-offset: -3px; }
+
+.seg input:disabled + span { opacity: .45; cursor: default; }
+
+.seg-dark { border-color: var(--bar-fg); font: 800 11px/1.4 var(--f-ui); }
+.seg-dark label + label { border-left-color: var(--bar-fg); }
+.seg-dark span { padding: 2px 8px; }
+.seg-dark input:checked + span { background: var(--accent); color: var(--on-accent); }
+
+/* ---------- 按钮 ---------- */
+
+.btn {
+  height: 30px;
+  padding: 0 12px;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.btn:disabled { opacity: .45; cursor: default; }
+
+.btn.small { height: 26px; padding: 0 10px; font-size: 12px; }
+
+.btn.accent, .btn.inv { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+
+.btn.inv-line { background: transparent; color: var(--bar-fg); border-color: var(--bar-fg); }
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: 800 11px var(--f-ui);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.link:disabled { opacity: .5; cursor: default; }
+
+.note { margin: 0; padding: 6px 14px; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+
+.note.warn { color: var(--warn); font-weight: 700; }
+
+.label-stack { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+
+.sub { font: 500 11px/1.35 var(--f-ui); color: var(--muted); }
+
+.select { position: relative; display: inline-flex; flex: none; }
+
+.select::after {
+  content: "";
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  margin-top: -2px;
+  border: 5px solid transparent;
+  border-top-color: var(--ink);
+  pointer-events: none;
+}
+
+.select select {
+  appearance: none;
+  max-width: 172px;
+  padding: 3px 26px 3px 8px;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.select select:disabled { opacity: .45; cursor: default; }
+
+.select-dark::after { border-top-color: var(--bar-fg); }
+
+.select-dark select { background: var(--bar); color: var(--bar-fg); border-color: var(--bar-fg); }
+
+.select.grow { flex: 1; min-width: 0; }
+
+.select.grow select { width: 100%; max-width: none; }
+
+/* 开关：方块滑块。盖在视频上的面板也用：这里不用 transform / transition（弹窗的滑动动画在 popup.css） */
+.switch { position: relative; display: inline-block; flex: none; width: 50px; height: 26px; }
+
+.switch input { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+
+.track { position: absolute; inset: 0; border: 2px solid var(--ink); background: var(--paper); pointer-events: none; }
+
+.track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background: var(--ink);
+}
+
+.switch input:checked + .track { background: var(--accent); }
+
+.switch input:checked + .track::after { left: 26px; background: var(--on-accent); }
+
+.switch input:focus-visible + .track { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+.switch input:disabled { cursor: default; }
+
+.switch input:disabled + .track { opacity: .45; }
+
+/* 复选框 */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-bottom: 2px solid var(--rule);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.check input, .sug input {
+  appearance: none;
+  flex: none;
+  display: grid;
+  place-content: center;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  cursor: pointer;
+}
+
+.check input:checked, .sug input:checked { background: var(--accent); border-color: var(--ink); }
+
+.check input:checked::after, .sug input:checked::after {
+  content: "";
+  width: 12px;
+  height: 12px;
+  background: var(--on-accent);
+  /* 勾号用遮罩画，不旋转（弹窗在 popup.css 换回边框旋转的画法） */
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M1.4 5.6 4.6 8.8 10.6 2.8' fill='none' stroke='%23000' stroke-width='3'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M1.4 5.6 4.6 8.8 10.6 2.8' fill='none' stroke='%23000' stroke-width='3'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+}
+
+.check input:disabled { opacity: .45; cursor: default; }
+
+.check-dark { min-height: 0; padding: 0 10px; border: 0; color: var(--bar-fg); font-size: 12px; }
+
+.check-dark input, .sug input { border-color: var(--bar-fg); background: transparent; }
+
+.check-dark input:checked, .sug input:checked { border-color: var(--accent); }
+
+.slider-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 52px;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  font-weight: 700;
+}
+
+.val {
+  display: block;
+  width: 52px;
+  padding: 0;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 15px/20px var(--f-num);
+  text-align: center;
+}
+
+input[type="range"] {
+  --a: 0%;
+  --b: 50%;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  background: linear-gradient(to right, var(--soft) 0 var(--a), var(--ink) var(--a) var(--b), var(--soft) var(--b) 100%);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 22px;
+  margin-top: -8px;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--accent);
+}
+
+input[type="range"]:focus-visible { outline: none; }
+
+input[type="range"]:focus-visible::-webkit-slider-thumb { outline: 3px solid var(--ink); outline-offset: 1px; }
+
+input[type="range"]:disabled { opacity: .45; cursor: default; }

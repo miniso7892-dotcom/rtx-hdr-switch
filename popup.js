@@ -4,26 +4,26 @@
 
   const L = globalThis.RtxHdrLib;
   const I = globalThis.RtxHdrI18n;
+  const U = globalThis.RtxHdrUi;
+  const C = globalThis.RtxHdrNvClient;
   const $ = (id) => document.getElementById(id);
   const REFRESH_MS = 1000;
   const IS_EDGE = /\bEdg\//.test(navigator.userAgent);
   const TAB_KEY = 'popupTab';
   const TABS = ['video', 'nv', 'rules'];
-  const HDR_ONLY_KEY = 'hdrOnlyStatus'; // background 写：{active, leased, error?}
-  const SDR_LAST_KEY = 'nvLastSdrWhite'; // 跟随 SDR 亮度：上次按它调过中间灰的白电平
+  const HDR_ONLY_KEY = 'hdrOnlyStatus'; // background 写：{active, leased, prevEnabled?, error?}
+  const SDR_LAST_KEY = 'nvLastSdrWhite'; // 跟随 SDR 亮度：上次按它调过中间灰的白电平（background 写）
   const NV_POLL_MS = 2000;
   const SDR_POLL_MS = 2000;
-  const NV_THROTTLE_MS = 200; // 和 NVIDIA App 拖动滑块时一样
+  // 同一白电平请 background 跟随一次后，隔这么久才再请（background 自己每 30 秒也看一次）
+  const SDR_ASK_MS = 30000;
   // 下拉框：键盘在收起的下拉框上按方向键时每一步都触发 change，停这么久没再变才写入 / 保存
   const NV_DEBOUNCE_MS = 500;
   const NV_CONFIRM_MS = 4000; // 「删除」按第一次后等确认的时间
-  const NV_TIMEOUT_MS = 8000;
-  const NV_LAST_PRESET_KEY = 'nvLastPresetId';
+  const NV_LAST_PRESET_KEY = 'nvLastPresetId'; // background 套用预设成功后写
   const NV_HOTKEY_ERROR_KEY = 'nvHotkeyError'; // 快捷键切换预设失败、页面上显示不了时 background 留下的提示
   const NV_HOTKEY_ERROR_MAX_AGE = 10 * 60 * 1000;
   const NV_SLIDERS = ['peak', 'middleGrey', 'contrast', 'saturation'];
-  // 这些错误说明本地组件或 NVIDIA App 用不了，不再轮询
-  const NV_FATAL = new Set(['host-missing', 'host-forbidden', 'no-dll', 'init', 'protocol']);
   // 文字由脚本随状态改写的元素：切换语言时不按 data-i18n 覆盖
   const DYNAMIC_TEXT = new Set(['video-message', 'nv-message', 'sdr-read', 'nv-delete']);
 
@@ -39,30 +39,23 @@
   let maybeFile = false; // 读不到网址（没有 tabs 权限时本地文件就是这样）且没开「允许访问文件网址」
   let frameId = 0;
   let current = null;
-  let settings = L.mergeSettings(null);
+  let settings = L.mergeSettings(null); // 界面上的设置：storage 里的值叠加还没被 background 收下的补丁
+  let stored = settings; // storage 里的设置（最近一次读到的）
+  let pendingPatch = null; // 防抖中还没发出的设置补丁
+  const sentPatches = []; // 已发给 background、还没回复的补丁
   let busy = false;
   let epoch = 0; // 每次用户操作 +1，丢弃操作前发出的刷新结果
   let commands = [];
   let hdrOnlyStatus = null;
 
-  let nvMode = 'connecting'; // connecting | missing | error | ready
-  let nvError = null;
-  let nvState = null; // 最近读到的 State，叠加了还没确认的乐观修改
-  let nvCaps = { display: false, hdrLease: false };
-  let nvLink = null; // {port, waiters}：弹窗开着时常驻的本地组件进程
-  let nvSeq = 0;
-  let nvPortFails = 0;
-  let nvUseBridge = false; // 端口用不了时改走 background（每次请求起一个进程）
-  let nvDraft = null; // 节流期间攒着还没发的修改
-  let nvQueued = null; // 等在途的 set 回来后再发的修改
-  let nvDraftDone = []; // 随 nvDraft / nvQueued 一起走的回调：写完（或失败）后调用
-  let nvQueuedDone = [];
-  let nvWriting = false;
-  let nvThrottle = 0;
-  let nvDrag = null; // {id, start, moved}：正在拖的滑块
-  let nvEpoch = 0; // 同 epoch：每次写入 +1，丢弃写入前发出的读取结果
-  let nvPolling = false;
-  let nvPollTimer = 0;
+  // NVIDIA 设置：本地组件连接、轮询和乐观写入（nv.mode / state / error / caps / drag，见 nv-client.js）
+  const nv = C.create({
+    pollMs: NV_POLL_MS,
+    log: true,
+    onChange: () => nvRender(),
+    onError: (err) => nvMessage(L.nvErrorText(err, lang), true),
+    beforeSet: dropHdrOnlyLease
+  });
   let nvMsgTimer = 0;
   let nvSelectedId = null;
   let nvLastPresetId = null;
@@ -75,6 +68,7 @@
   let sdrBusy = false;
   let sdrPollTimer = 0;
   let sdrLastWhite = null;
+  let sdrAsked = null; // {white, at}：最近一次请 background 跟随的白电平
   let sdrMsgTimer = 0;
 
   function noop() {}
@@ -100,14 +94,11 @@
 
   // 每秒刷新一次：只在内容真的变了时才写 DOM，免得读屏软件反复朗读
   function setText(id, text) {
-    const el = $(id);
-    if (el.textContent !== text) el.textContent = text;
-    return el;
+    return U.setText($(id), text);
   }
 
   function setClass(id, cls) {
-    const el = $(id);
-    if (el.className !== cls) el.className = cls;
+    U.setClass($(id), cls);
   }
 
   function radios(name) {
@@ -134,11 +125,7 @@
   }
 
   function applyTheme(hex) {
-    const ink = L.accentInk(hex || settings.ui.accent);
-    const st = document.documentElement.style;
-    st.setProperty('--accent', ink.accent);
-    st.setProperty('--on-accent', ink.on);
-    st.setProperty('--accent-fg', ink.fg);
+    U.applyTheme(document.documentElement, hex || settings.ui.accent);
   }
 
   function checkSvg(color) {
@@ -333,8 +320,8 @@
   function renderGlobalOff() {
     let text = '';
     let canTurnOn = false;
-    if (nvMode === 'ready' && nvState) {
-      const h = nvState.hdr;
+    if (nv.mode === 'ready' && nv.state) {
+      const h = nv.state.hdr;
       if (!h.supported) text = L.nvErrorText({ code: 'unsupported', field: 'hdr' }, lang);
       else if (h.error) text = L.nvHdrErrorText(h.error, lang);
       else if (!h.enabled && !(hdrOnlyStatus && hdrOnlyStatus.leased)) {
@@ -396,7 +383,7 @@
     renderFoot();
     renderShortcuts();
     if (current) renderState(current);
-    if (nvState) nvRender();
+    if (nv.state) nvRender();
     renderSdr();
   }
 
@@ -411,18 +398,17 @@
   function renderHdrOnlyStatus() {
     let text = '';
     if (settings.hdrOnly) {
-      if (nvMode === 'missing') text = t('rules.hdrOnlyNeedsHost');
-      else if (nvMode === 'ready' && !nvCaps.hdrLease) text = t('rules.hdrOnlyOldHost');
+      if (nv.mode === 'missing') text = t('rules.hdrOnlyNeedsHost');
+      else if (nv.mode === 'ready' && !nv.caps.hdrLease) text = t('rules.hdrOnlyOldHost');
       else if (hdrOnlyStatus && hdrOnlyStatus.error) text = t('rules.hdrOnlyFailed', { err: L.nvErrorText(hdrOnlyStatus.error, lang) });
     }
     setText('hdr-only-status', text).hidden = !text;
   }
 
-  // delay：过一会儿再写 storage（期间再改会重新计时），界面和 settings 立即更新
+  // 设置只由 background 写：这里把改动变成最小补丁（L.settingsPatchFor）发过去。
+  // delay：过一会儿再发（期间再改会重新计时，补丁合并），界面和 settings 立即更新
   function save(mutate, delay) {
-    const next = L.mergeSettings(settings);
-    mutate(next);
-    settings = L.mergeSettings(next);
+    stage(mutate);
     renderSettings();
     clearTimeout(saveTimer);
     saveTimer = 0;
@@ -430,10 +416,44 @@
     else flushSave();
   }
 
+  // 只改 settings、记下补丁，不重画也不发
+  function stage(mutate) {
+    const next = L.mergeSettings(settings);
+    mutate(next);
+    const merged = L.mergeSettings(next);
+    const patch = L.settingsPatchFor(settings, merged);
+    settings = merged;
+    if (patch) pendingPatch = L.mergeSettingsPatch(pendingPatch, patch);
+  }
+
   function flushSave() {
     clearTimeout(saveTimer);
     saveTimer = 0;
-    call(() => chrome.storage.local.set({ settings: settings })).catch(noop);
+    const patch = pendingPatch;
+    pendingPatch = null;
+    if (!patch) return;
+    const entry = { patch: patch };
+    sentPatches.push(entry);
+    call(() => chrome.runtime.sendMessage({ type: 'settings-patch', patch: patch })).then(
+      (r) => !!r && r.ok === true, () => false
+    ).then((ok) => {
+      const i = sentPatches.indexOf(entry);
+      if (i >= 0) sentPatches.splice(i, 1);
+      if (!ok) rebase(); // background 没收下：界面回到 storage 里的值（只保留其他还没回复的修改）
+    });
+  }
+
+  // 还没被 background 收下的修改：已发出等回复的和防抖中的
+  function unsentPatch() {
+    let p = null;
+    for (const e of sentPatches) p = L.mergeSettingsPatch(p, e.patch);
+    return L.mergeSettingsPatch(p, pendingPatch);
+  }
+
+  // storage 里的设置变了（别处的修改、自己补丁的回声）：在新值上重新叠加还没收下的修改，用户刚输入的值不会被覆盖
+  function rebase() {
+    settings = L.applySettingsPatch(stored, unsentPatch()) || stored;
+    renderSettings();
   }
 
   function onChange(id, fn) {
@@ -445,10 +465,29 @@
     call(() => chrome.tabs.create({ url: url })).catch(noop);
   }
 
-  // 「只关 HDR」模式正借着全局开关：用户亲手改全局 HDR 时先让 background 放手（不再恢复）
-  function dropHdrOnlyLease() {
-    if (!(hdrOnlyStatus && hdrOnlyStatus.leased)) return;
-    call(() => chrome.runtime.sendMessage({ type: 'hdr-only', op: 'drop' })).catch(noop);
+  // 「只关 HDR」模式正借着全局开关时，自己端口上要改全局 HDR 的写入先让 background 放手（不再恢复）。
+  // 全局 HDR 开关和套用预设走 background（nv-op），由它按 suppress / yield 处理借用；这里只是兜底
+  function dropHdrOnlyLease(patch) {
+    if (!(patch && patch.hdr && typeof patch.hdr.enabled === 'boolean')) return null;
+    if (!(hdrOnlyStatus && hdrOnlyStatus.leased)) return null;
+    return call(() => chrome.runtime.sendMessage({ type: 'hdr-only', op: 'drop' })).catch(noop);
+  }
+
+  // 交给 background 写入服务的 NVIDIA 操作（套用预设、全局 HDR 开关、跟随 SDR）
+  function nvOp(msg) {
+    return call(() => chrome.runtime.sendMessage(Object.assign({ type: 'nv-op' }, msg))).then(
+      (r) => (r && typeof r === 'object' ? r : { ok: false, error: { code: 'host-error' } }),
+      (e) => L.nvPortError((e && e.message) || 'error'));
+  }
+
+  // 用户亲手拨全局 HDR（开关、「开启」按钮）：经 background，借用按 suppress 处理（这个视频不再借）
+  function nvSetEnabled(on) {
+    if (!nv.state) return;
+    const patch = { hdr: { enabled: on } };
+    nv.local(patch);
+    nv.exclusive(() => nvOp({ op: 'set', patch: patch, mode: 'suppress' })).then((res) => {
+      if (!res || res.ok !== true) nv.failed(res);
+    });
   }
 
   function bind() {
@@ -514,7 +553,7 @@
     });
     $('btn-export').addEventListener('click', () => openOptions('#export'));
     $('btn-import').addEventListener('click', () => openOptions('#import'));
-    $('global-off-on').addEventListener('click', () => nvWrite({ hdr: { enabled: true } }, true));
+    $('global-off-on').addEventListener('click', () => nvSetEnabled(true));
 
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
@@ -528,226 +567,22 @@
           if (current) renderState(current);
         }
         if (changes.settings) {
-          settings = L.mergeSettings(changes.settings.newValue);
-          renderSettings();
+          stored = L.mergeSettings(changes.settings.newValue);
+          rebase();
           sdrSyncPolling();
         }
       });
     } catch (e) { /* ignore */ }
   }
 
-  // ---------- NVIDIA 设置：与本地组件通信 ----------
-
-  function nvOpenLink() {
-    let port;
-    try { port = chrome.runtime.connectNative(L.NV_HOST); } catch (e) { return null; }
-    const link = { port: port, waiters: [] };
-    port.onMessage.addListener((res) => {
-      if (!res || typeof res !== 'object') return;
-      // 按 id 对应；本地组件没回 id 时按顺序。已超时的请求的迟到回复直接丢掉
-      const i = res.id == null ? 0 : link.waiters.findIndex((w) => w.id === res.id);
-      if (i < 0 || !link.waiters.length) return;
-      link.waiters.splice(i, 1)[0].done(res);
-    });
-    port.onDisconnect.addListener(() => {
-      const err = chrome.runtime.lastError; // 没安装本地组件时是 "Specified native messaging host not found."
-      if (nvLink === link) nvLink = null;
-      const fail = L.nvPortError(err && err.message);
-      for (const w of link.waiters.splice(0)) w.done(fail);
-    });
-    return link;
-  }
-
-  function nvBridge(msg) {
-    const payload = Object.assign({}, msg);
-    delete payload.cmd;
-    return call(() => chrome.runtime.sendMessage({ type: 'nv', op: msg.cmd, payload: payload })).then(
-      (r) => (r && typeof r === 'object' ? r : { ok: false, error: { code: 'host-error' } }),
-      (e) => L.nvPortError((e && e.message) || 'error'));
-  }
-
-  // 弹窗开着时用自己的端口（本地组件常驻，拖动滑块延迟低，弹窗关掉端口随之关闭）；
-  // 端口连续断开 3 次就改走 background
-  function nvRequest(msg) {
-    if (!nvUseBridge && !nvLink) {
-      nvLink = nvOpenLink();
-      if (!nvLink) nvUseBridge = true;
-    }
-    if (nvUseBridge) return nvBridge(msg);
-    const link = nvLink;
-    const id = ++nvSeq;
-    return new Promise((resolve) => {
-      const w = { id: id, done: null };
-      const timer = setTimeout(() => {
-        const i = link.waiters.indexOf(w);
-        if (i >= 0) link.waiters.splice(i, 1);
-        resolve({ ok: false, error: { code: 'timeout' } });
-      }, NV_TIMEOUT_MS);
-      w.done = (res) => {
-        clearTimeout(timer);
-        resolve(res);
-      };
-      link.waiters.push(w);
-      try {
-        link.port.postMessage(Object.assign({ id: id }, msg));
-      } catch (e) {
-        const i = link.waiters.indexOf(w);
-        if (i >= 0) link.waiters.splice(i, 1);
-        w.done(L.nvPortError((e && e.message) || 'error'));
-      }
-    }).then((res) => {
-      const code = res && res.error && res.error.code;
-      if (res && res.ok === true) nvPortFails = 0;
-      else if ((code === 'host-exit' || code === 'host-error') && ++nvPortFails >= 3) nvUseBridge = true;
-      return res;
-    });
-  }
-
-  function nvBusy() {
-    return nvWriting || !!nvQueued || !!nvDraft || !!nvDrag;
-  }
-
-  function nvStopPolling() {
-    clearInterval(nvPollTimer);
-    nvPollTimer = 0;
-  }
-
-  function nvAccept(state) {
-    nvState = L.nvNormState(state);
-    nvMode = 'ready';
-    nvError = null;
-    nvRender();
-  }
-
-  // 本地组件没装、NVIDIA App 缺失等：整块换成说明；接口偶尔出错：保留上次的状态，只提示一下
-  function nvFailed(res) {
-    const err = (res && res.error) || { code: 'host-error' };
-    if (err.code === 'host-missing') {
-      nvMode = 'missing';
-    } else if (NV_FATAL.has(err.code) || !nvState) {
-      nvMode = 'error';
-    } else {
-      nvMessage(L.nvErrorText(err, lang), true);
-      return;
-    }
-    nvError = err;
-    if (NV_FATAL.has(err.code)) nvStopPolling();
-    nvRender();
-  }
-
-  async function nvPoll() {
-    if (nvPolling || nvBusy() || nvMode === 'missing') return;
-    nvPolling = true;
-    const startEpoch = nvEpoch;
-    try {
-      const res = await nvRequest({ cmd: 'get' });
-      if (startEpoch !== nvEpoch || nvBusy()) return; // 读的时候用户改过了：这份是旧的
-      if (res && res.ok === true && L.nvNormState(res.state)) nvAccept(res.state);
-      else nvFailed(res);
-    } finally {
-      nvPolling = false;
-    }
-  }
+  // ---------- NVIDIA 设置：连接 ----------
 
   async function nvStart() {
-    nvRender();
-    const hello = await nvRequest({ cmd: 'hello' });
-    if (!hello || hello.ok !== true) nvFailed(hello);
-    else if (hello.protocol !== L.NV_PROTOCOL) nvFailed({ error: { code: 'protocol' } });
-    else {
-      const caps = Array.isArray(hello.caps) ? hello.caps : [];
-      nvCaps = { display: caps.indexOf('display') >= 0, hdrLease: caps.indexOf('hdrLease') >= 0 };
-    }
-    if (nvMode === 'missing' || (nvError && NV_FATAL.has(nvError.code))) return;
-    await nvPoll();
-    if (nvMode === 'missing' || (nvError && NV_FATAL.has(nvError.code))) return;
-    nvPollTimer = setInterval(nvPoll, NV_POLL_MS);
+    await nv.start();
+    if (nv.mode === 'missing' || (nv.error && C.FATAL.has(nv.error.code))) return;
     // 已经开着「跟随 SDR 亮度」或之前读过：打开弹窗就读一次
-    if (nvCaps.display) sdrRead().then(sdrSyncPolling);
+    if (nv.caps.display) sdrRead().then(sdrSyncPolling);
     else renderSdr();
-  }
-
-  // ---------- NVIDIA 设置：写入 ----------
-
-  // 先乐观更新界面；拖动中 200 ms 节流（commit:false），松手 / 键盘 / 选择时立即发并提交；
-  // final 为 'soon'（下拉框）时停 500 ms 没再变才发并提交，途经的选项不写进驱动。
-  // done(res)：这次修改写完（或失败）后调用
-  function nvWrite(patch, final, done) {
-    if (!nvState) return;
-    nvEpoch++;
-    nvState = L.nvApplyPatch(nvState, patch);
-    nvDraft = L.nvMergePatch(nvDraft, patch);
-    if (done) nvDraftDone.push(done);
-    if (final === 'soon') {
-      nvDraft.commit = true;
-      clearTimeout(nvThrottle);
-      nvThrottle = setTimeout(nvThrottled, NV_DEBOUNCE_MS);
-    } else if (final) {
-      clearTimeout(nvThrottle);
-      nvThrottle = 0;
-      nvDraft.commit = true;
-      nvFlush();
-    } else if (!nvThrottle) {
-      nvThrottle = setTimeout(nvThrottled, NV_THROTTLE_MS);
-    }
-    nvRender();
-  }
-
-  function nvThrottled() {
-    nvThrottle = 0;
-    nvFlush();
-  }
-
-  function nvFlush() {
-    if (!nvDraft) return;
-    nvQueued = L.nvMergePatch(nvQueued, nvDraft);
-    if (nvQueued.commit !== true) nvQueued.commit = false;
-    nvQueuedDone = nvQueuedDone.concat(nvDraftDone);
-    nvDraft = null;
-    nvDraftDone = [];
-    nvPump();
-  }
-
-  function nvDone(fns, res) {
-    for (const f of fns) {
-      try { f(res); } catch (e) { /* ignore */ }
-    }
-  }
-
-  // 一次只有一个 set 在途；在途期间的修改合并成下一个
-  async function nvPump() {
-    if (nvWriting || !nvQueued) return;
-    const v = L.nvValidatePatch(nvQueued, nvState);
-    const done = nvQueuedDone;
-    nvQueued = null;
-    nvQueuedDone = [];
-    if (!v.ok) {
-      nvMessage(L.nvErrorText(v.error, lang), true);
-      nvEpoch++;
-      nvPoll(); // 读回真实状态，撤销乐观修改
-      nvDone(done, v);
-      return;
-    }
-    nvWriting = true;
-    let res = null;
-    try {
-      res = await nvRequest(Object.assign({ cmd: 'set' }, v.patch));
-    } finally {
-      nvWriting = false;
-    }
-    nvEpoch++;
-    const ok = res && res.ok === true && L.nvNormState(res.state);
-    if (!ok) nvFailed(res);
-    nvDone(done, ok ? res : Object.assign({ ok: false, error: { code: 'host-error' } }, res, { ok: false }));
-    if (nvQueued) {
-      nvPump();
-      return;
-    }
-    if (ok) {
-      if (!nvBusy()) nvAccept(res.state); // 以本地组件读回的为准（驱动可能修正了数值）
-    } else if (nvMode === 'ready') {
-      nvPoll();
-    }
   }
 
   // keep：不自动消失（「正在套用…」这类等结果的提示）
@@ -760,63 +595,29 @@
 
   // ---------- NVIDIA 设置：界面 ----------
 
-  function setNum(el, v) {
-    const s = String(v);
-    if (el.value !== s) el.value = s;
-  }
-
-  function setAttr(el, name, v) {
-    const s = String(v);
-    if (el.getAttribute(name) !== s) el.setAttribute(name, s);
-  }
-
-  // 滑块轨道上的填充：单向的从左端到滑块，正负对称的（对比度、饱和度）从中点到滑块
-  function sliderFill(el) {
-    const min = Number(el.min), max = Number(el.max), v = Number(el.value);
-    const pct = max > min ? Math.min(100, Math.max(0, (v - min) / (max - min) * 100)) : 0;
-    const bipolar = min < 0 && max > 0;
-    el.style.setProperty('--a', (bipolar ? Math.min(50, pct) : 0) + '%');
-    el.style.setProperty('--b', (bipolar ? Math.max(50, pct) : pct) + '%');
-  }
-
-  function signed(n) {
-    return n > 0 ? '+' + n : String(n);
-  }
-
-  // items: [[value, text, disabled?]]；选项变了才重建，免得打断正在用的下拉框
-  function fillSelect(el, items, value) {
-    const sig = JSON.stringify(items);
-    if (el.dataset.sig !== sig) {
-      el.textContent = '';
-      for (const it of items) {
-        const o = document.createElement('option');
-        o.value = it[0];
-        o.textContent = it[1];
-        if (it[2]) o.disabled = true;
-        el.appendChild(o);
-      }
-      el.dataset.sig = sig;
-    }
-    if (el.value !== value) el.value = value;
-  }
+  const setNum = U.setNum;
+  const setAttr = U.setAttr;
+  const sliderFill = U.sliderFill;
+  const signed = U.signed;
+  const fillSelect = U.fillSelect;
 
   function nvRender() {
-    const ready = nvMode === 'ready' && !!nvState;
-    $('nv-missing').hidden = nvMode !== 'missing';
+    const ready = nv.mode === 'ready' && !!nv.state;
+    $('nv-missing').hidden = nv.mode !== 'missing';
     $('nv-panel').hidden = !ready;
-    if (nvMode === 'missing') setText('nv-missing-text', L.nvErrorText({ code: 'host-missing' }, lang));
+    if (nv.mode === 'missing') setText('nv-missing-text', L.nvErrorText({ code: 'host-missing' }, lang));
     const m = $('nv-message');
-    m.hidden = ready || nvMode === 'missing';
+    m.hidden = ready || nv.mode === 'missing';
     if (!m.hidden) {
-      setText('nv-message', nvMode === 'connecting' ? t('nv.connecting') : L.nvErrorText(nvError, lang));
-      m.classList.toggle('warn', nvMode === 'error');
+      setText('nv-message', nv.mode === 'connecting' ? t('nv.connecting') : L.nvErrorText(nv.error, lang));
+      m.classList.toggle('warn', nv.mode === 'error');
     }
     renderNvPresets();
     renderGlobalOff();
     renderHdrOnlyStatus();
     if (!ready) return;
 
-    const h = nvState.hdr;
+    const h = nv.state.hdr;
     const hdrOk = h.supported && !h.error;
     const reason = !h.supported ? L.nvErrorText({ code: 'unsupported', field: 'hdr' }, lang) : L.nvHdrErrorText(h.error, lang);
     setText('nv-hdr-reason', reason).hidden = !reason;
@@ -834,7 +635,7 @@
     for (const f of NV_SLIDERS) {
       const el = $('nv-' + f);
       el.disabled = !hdrOk;
-      if (!(nvDrag && nvDrag.id === el.id)) setNum(el, h[f]);
+      if (!(nv.drag && nv.drag.id === el.id)) setNum(el, h[f]);
       sliderFill(el);
       if (f !== 'peak') setText('nv-' + f + '-out', f === 'middleGrey' ? String(h[f]) : signed(h[f]));
     }
@@ -843,7 +644,7 @@
     if (document.activeElement !== num) setNum(num, h.peak);
     $('nv-peak-hint').hidden = !(h.peak > 1000);
 
-    const v = nvState.vsr;
+    const v = nv.state.vsr;
     setText('nv-vsr-reason', v.supported ? '' : L.nvErrorText({ code: 'unsupported', field: 'vsr' }, lang)).hidden = v.supported;
     const sel = $('nv-vsr');
     sel.disabled = !v.supported;
@@ -853,8 +654,8 @@
     // GPU 优先级只在自动模式下有意义；驱动没有 0x32F / 0x330 时（priority / indicator 为 null）不显示
     $('nv-priority-row').hidden = !(v.supported && v.mode === 5 && v.priority !== null);
     for (const r of radios('nv-priority')) r.checked = Number(r.value) === v.priority;
-    $('nv-indicator-row').hidden = nvState.indicator === null;
-    $('nv-indicator').checked = nvState.indicator === true;
+    $('nv-indicator-row').hidden = nv.state.indicator === null;
+    $('nv-indicator').checked = nv.state.indicator === true;
     renderSdr();
   }
 
@@ -866,7 +667,7 @@
     const sel = $('nv-preset');
     fillSelect(sel, items, nvSelectedId || '');
     sel.disabled = !presets.length;
-    const ready = nvMode === 'ready' && !!nvState;
+    const ready = nv.mode === 'ready' && !!nv.state;
     $('nv-apply').disabled = !ready || !presets.length;
     $('nv-delete').disabled = !presets.length;
     $('nv-save').disabled = !ready;
@@ -878,7 +679,7 @@
       fillSelect($(id), opts, settings.nv[id === 'nv-night-preset' ? 'nightPresetId' : 'dayPresetId'] || '');
       $(id).disabled = !presets.length; // 只有「不切换」可选
     }
-    const missing = nvMode === 'missing';
+    const missing = nv.mode === 'missing';
     setText('nv-schedule-hint', !presets.length
       ? t(missing ? 'nv.scheduleNeedHost' : 'nv.scheduleNeedPresets')
       : t('nv.scheduleHint') + (missing ? t('nv.scheduleHintMissing') : ''));
@@ -906,8 +707,10 @@
 
   // 同名的预设先提示，再保存一次才覆盖（保留 id，夜间 / 其余时间的选择不受影响）
   function nvSavePreset() {
-    if (!nvState) return;
-    const probe = L.nvPresetFromState(nvState, $('nv-preset-name').value, 'probe');
+    if (!nv.state) return;
+    // 「只关 HDR」正借着全局开关时，存借用前的开关（不知道时不存开关），免得以后套用这个预设把 HDR 关掉
+    const base = L.nvUnleased(nv.state, hdrOnlyStatus);
+    const probe = L.nvPresetFromState(base, $('nv-preset-name').value, 'probe');
     if (!probe) {
       nvMessage(t('nv.enterName'), true);
       $('nv-preset-name').focus();
@@ -925,7 +728,7 @@
       return;
     }
     nvOverwriteName = null;
-    const preset = L.nvPresetFromState(nvState, probe.name, same ? same.id : nvNewId());
+    const preset = L.nvPresetFromState(base, probe.name, same ? same.id : nvNewId());
     save((s) => {
       const i = s.nv.presets.findIndex((p) => p.id === preset.id);
       if (i >= 0) s.nv.presets[i] = preset;
@@ -938,26 +741,29 @@
     nvMessage(t(same ? 'nv.updated' : 'nv.saved', { name: preset.name }));
   }
 
+  // 经 background 套用（借用按 yield 处理：预设的开关和借用前一样时不碰借用，不闪烁）。
+  // 本地组件确认写入后才提示成功；background 记下「上次套用的预设」（快捷键从它的下一个开始轮换）
   function nvApplyPreset() {
     const p = settings.nv.presets.find((x) => x.id === nvSelectedId);
-    if (!p || !nvState) return;
-    const patch = L.nvPresetPatch(p, nvState);
+    if (!p || !nv.state) return;
+    const patch = L.nvPresetPatch(p, nv.state);
     if (!patch) {
-      const h = nvState.hdr;
+      const h = nv.state.hdr;
       nvMessage(L.nvErrorText(h.supported && h.error ? { code: 'hdr-error', errorCode: h.error } : { code: 'unsupported' }, lang), true);
       return;
     }
-    const partial = patch.hdr ? '' : t('nv.partial');
     nvMessage(t('nv.applying', { name: p.name }), false, true);
-    // 本地组件确认写入后才提示成功、记下「上次套用的预设」（快捷键从它的下一个开始轮换）
-    nvWrite(patch, true, (res) => {
+    // 先显示预设的值；借用期间开关以 background 回的为准
+    const view = L.nvMergePatch(patch, null);
+    if (view.hdr && hdrOnlyStatus && hdrOnlyStatus.leased) delete view.hdr.enabled;
+    nv.local(view);
+    nv.exclusive(() => nvOp({ op: 'apply-preset', id: p.id })).then((res) => {
       if (!res || res.ok !== true) {
         nvMessage(t('nv.applyFailed', { err: L.nvErrorText(res && res.error, lang) }), true);
         return;
       }
       nvLastPresetId = p.id;
-      call(() => chrome.storage.local.set({ [NV_LAST_PRESET_KEY]: p.id })).catch(noop);
-      nvMessage(t('nv.applied', { name: p.name }) + partial);
+      nvMessage(t('nv.applied', { name: p.name }) + (res.hdrSkipped ? t('nv.partial') : ''));
     });
   }
 
@@ -1002,11 +808,10 @@
 
   // 拖回起点时 Chrome 不发 change，松手时照样提交一次
   function nvEndDrag() {
-    const d = nvDrag;
+    const d = nv.dragEnd();
     if (!d) return;
-    nvDrag = null;
     const el = $(d.id);
-    if (d.moved && el.value === d.start) nvWrite({ hdr: { [el.dataset.field]: Number(el.value) } }, true);
+    if (d.moved && el.value === d.start) nv.write({ hdr: { [el.dataset.field]: Number(el.value) } }, true);
   }
 
   // ---------- Windows SDR 亮度 → 建议值 ----------
@@ -1023,12 +828,12 @@
   }
 
   async function sdrRead() {
-    if (!nvCaps.display || sdrBusy) return;
+    if (!nv.caps.display || sdrBusy) return;
     sdrBusy = true;
     renderSdr();
     let res = null;
     try {
-      res = await nvRequest({ cmd: 'display' });
+      res = await nv.request({ cmd: 'display' });
     } finally {
       sdrBusy = false;
     }
@@ -1042,21 +847,21 @@
     renderSdr();
   }
 
-  // 跟随 SDR 亮度：白电平和上次调中间灰时不一样就按新的白电平调一次（弹窗开着时由这里做，关着时 background 每 30 秒看一次）
+  // 跟随 SDR 亮度：弹窗开着时每 2 秒读一次白电平，和上次调中间灰时不一样就请 background 调
+  // （它读显示器、写中间灰、成功后才记下这个白电平；弹窗关着时它每 30 秒自己看一次）
   function sdrFollow() {
-    if (!settings.nv.followSdr || !nvState || nvBusy()) return;
+    if (!settings.nv.followSdr || !nv.state || nv.busy()) return;
     const d = sdrCurrent();
-    const sug = d && L.nvSuggest(d, nvState);
+    const sug = d && L.nvSuggest(d, nv.state);
     if (!sug || d.sdrWhiteNits === sdrLastWhite) return;
-    sdrLastWhite = d.sdrWhiteNits;
-    call(() => chrome.storage.local.set({ [SDR_LAST_KEY]: d.sdrWhiteNits })).catch(noop);
-    if (sug.middleGrey !== nvState.hdr.middleGrey && nvState.hdr.supported && !nvState.hdr.error) {
-      nvWrite({ hdr: { middleGrey: sug.middleGrey } }, true);
-    }
+    const now = Date.now();
+    if (sdrAsked && sdrAsked.white === d.sdrWhiteNits && now - sdrAsked.at < SDR_ASK_MS) return;
+    sdrAsked = { white: d.sdrWhiteNits, at: now };
+    nv.exclusive(() => nvOp({ op: 'follow-check' }));
   }
 
   function sdrSyncPolling() {
-    const want = settings.nv.followSdr && nvCaps.display && nvMode === 'ready';
+    const want = settings.nv.followSdr && nv.caps.display && nv.mode === 'ready';
     if (want && !sdrPollTimer) sdrPollTimer = setInterval(sdrRead, SDR_POLL_MS);
     else if (!want && sdrPollTimer) {
       clearInterval(sdrPollTimer);
@@ -1075,8 +880,8 @@
   function renderSdr() {
     const read = $('sdr-read');
     setText('sdr-read', sdrBusy ? t('sdr.reading') : sdrDisplays ? t('sdr.reread') : t('sdr.read'));
-    read.disabled = sdrBusy || !nvCaps.display || nvMode !== 'ready';
-    const ready = nvMode === 'ready' && !!nvState;
+    read.disabled = sdrBusy || !nv.caps.display || nv.mode !== 'ready';
+    const ready = nv.mode === 'ready' && !!nv.state;
     const list = sdrDisplays || [];
     $('sdr-display-wrap').hidden = list.length < 2;
     if (list.length >= 2) {
@@ -1084,12 +889,12 @@
       fillSelect($('sdr-display'), list.map((d) => [d.id, d.name || d.id]), d0 ? d0.id : '');
     }
     const d = sdrCurrent();
-    const sug = ready && d ? L.nvSuggest(d, nvState) : null;
+    const sug = ready && d ? L.nvSuggest(d, nv.state) : null;
     $('sdr-empty').hidden = !!sdrDisplays;
     $('sdr-body').hidden = !d;
     $('sdr-actions').hidden = !sug;
     if (!ready) return;
-    if (nvMode === 'ready' && !nvCaps.display) {
+    if (nv.mode === 'ready' && !nv.caps.display) {
       if ($('sdr-msg').textContent !== t('nv.err.old-host')) sdrMessage(t('nv.err.old-host'), true);
       return;
     }
@@ -1105,7 +910,7 @@
       if (!d.hdrEnabled) setText('sdr-msg', t('sdr.hdrOff'));
       return;
     }
-    const h = nvState.hdr;
+    const h = nv.state.hdr;
     renderSug('sug-mg', h.middleGrey, sug.middleGrey, String);
     renderSug('sug-peak', h.peak, sug.peak, String);
     renderSug('sug-con', h.contrast, sug.contrast, signed);
@@ -1114,22 +919,31 @@
 
   function sdrSync() {
     const d = sdrCurrent();
-    const sug = d && nvState ? L.nvSuggest(d, nvState) : null;
+    const sug = d && nv.state ? L.nvSuggest(d, nv.state) : null;
     if (!sug) return;
-    const h = nvState.hdr;
+    const h = nv.state.hdr;
     const hdr = {};
     if ($('sug-mg').checked && sug.middleGrey !== h.middleGrey) hdr.middleGrey = sug.middleGrey;
     if ($('sug-peak').checked && sug.peak !== h.peak) hdr.peak = sug.peak;
     if ($('sug-con').checked && sug.contrast !== h.contrast) hdr.contrast = sug.contrast;
-    sdrLastWhite = d.sdrWhiteNits;
-    call(() => chrome.storage.local.set({ [SDR_LAST_KEY]: d.sdrWhiteNits })).catch(noop);
+    // 记下这个白电平，跟随 SDR 不再按它重调；建议值已经一样或写成功了才记
+    const white = d.sdrWhiteNits;
+    const remember = () => {
+      sdrLastWhite = white;
+      call(() => chrome.storage.local.set({ [SDR_LAST_KEY]: white })).catch(noop);
+    };
     if (!Object.keys(hdr).length) {
+      remember();
       sdrMessage(t('sdr.nothing'));
       return;
     }
-    nvWrite({ hdr: hdr }, true, (res) => {
-      if (res && res.ok === true) sdrMessage(t('sdr.synced'));
-      else sdrMessage(L.nvErrorText(res && res.error, lang), true);
+    nv.write({ hdr: hdr }, true, (res) => {
+      if (res && res.ok === true) {
+        remember();
+        sdrMessage(t('sdr.synced'));
+      } else {
+        sdrMessage(L.nvErrorText(res && res.error, lang), true);
+      }
     });
   }
 
@@ -1137,22 +951,22 @@
     for (const f of NV_SLIDERS) {
       const el = $('nv-' + f);
       el.dataset.field = f;
-      el.addEventListener('pointerdown', () => { nvDrag = { id: el.id, start: el.value, moved: false }; });
+      el.addEventListener('pointerdown', () => nv.dragBegin(el.id, el.value));
       el.addEventListener('input', () => {
-        if (nvDrag && nvDrag.id === el.id) nvDrag.moved = true;
+        nv.dragMove(el.id);
         sliderFill(el);
-        nvWrite({ hdr: { [f]: Number(el.value) } }, false);
+        nv.write({ hdr: { [f]: Number(el.value) } }, false);
       });
       el.addEventListener('change', () => {
-        if (nvDrag && nvDrag.id === el.id) nvDrag = null;
-        nvWrite({ hdr: { [f]: Number(el.value) } }, true);
+        nv.dragClear(el.id);
+        nv.write({ hdr: { [f]: Number(el.value) } }, true);
       });
     }
     window.addEventListener('pointerup', nvEndDrag);
     window.addEventListener('pointercancel', nvEndDrag);
 
     onChange('nv-peak-num', (el) => {
-      const h = nvState && nvState.hdr;
+      const h = nv.state && nv.state.hdr;
       const n = Math.round(Number(el.value));
       if (!h || el.value.trim() === '' || !isFinite(n)) {
         if (h) el.value = String(h.peak);
@@ -1160,27 +974,20 @@
       }
       const peak = Math.min(h.peakMax, Math.max(h.peakMin, n));
       el.value = String(peak); // 超出范围时写回夹过的值
-      nvWrite({ hdr: { peak: peak } }, true);
+      nv.write({ hdr: { peak: peak } }, true);
     });
-    onChange('nv-hdr', (el) => {
-      dropHdrOnlyLease();
-      nvWrite({ hdr: { enabled: el.checked } }, true);
-    });
-    onChange('nv-vsr', (el) => nvWrite({ vsr: { mode: Number(el.value) } }, 'soon'));
+    onChange('nv-hdr', (el) => nvSetEnabled(el.checked));
+    onChange('nv-vsr', (el) => nv.write({ vsr: { mode: Number(el.value) } }, 'soon'));
     for (const r of radios('nv-priority')) {
-      r.addEventListener('change', () => { if (r.checked) nvWrite({ vsr: { priority: Number(r.value) } }, true); });
+      r.addEventListener('change', () => { if (r.checked) nv.write({ vsr: { priority: Number(r.value) } }, true); });
     }
-    onChange('nv-indicator', (el) => nvWrite({ indicator: el.checked }, true));
+    onChange('nv-indicator', (el) => nv.write({ indicator: el.checked }, true));
 
     $('sdr-read').addEventListener('click', () => sdrRead());
     $('sdr-sync').addEventListener('click', sdrSync);
     onChange('sdr-display', (el) => save((s) => { s.nv.displayId = el.value || null; }));
+    // 打开时 background 清掉上次的白电平，按当前白电平立刻调一次
     onChange('sdr-follow', (el) => {
-      // 第一次打开时立刻按当前白电平调一次
-      if (el.checked) {
-        sdrLastWhite = null;
-        call(() => chrome.storage.local.remove(SDR_LAST_KEY)).catch(noop);
-      }
       save((s) => { s.nv.followSdr = el.checked; });
       if (el.checked) sdrRead();
     });
@@ -1213,36 +1020,17 @@
       e.preventDefault();
       call(() => chrome.tabs.create({ url: e.currentTarget.href })).catch(noop);
     });
-    // 弹窗关闭前把还没发出去的修改直接发出去：节流 / 防抖中的和排在在途 set 后面的合并成一次。
-    // 不等在途 set 的回复（弹窗关了也收不到）：本地组件按顺序处理同一端口上的请求，
-    // 走 background 时它也按队列顺序发；已经发出去的会被本地组件处理完
+    // 弹窗关闭前把还没发出去的修改直接发出去：设置补丁（防抖中的、拖动取色器时的）交给 background，
+    // NVIDIA 的修改由 nv-client 合并成一次直接发（不等回复，见 flushNow）
     window.addEventListener('pagehide', () => {
-      clearTimeout(nvThrottle);
-      nvThrottle = 0;
       if (accentTimer) {
         clearTimeout(accentTimer);
         accentTimer = 0;
         const v = $('theme-custom').value;
-        if (v) {
-          settings = L.mergeSettings(Object.assign({}, settings, { ui: Object.assign({}, settings.ui, { accent: v }) }));
-          flushSave();
-        }
+        if (v) stage((s) => { s.ui.accent = v; });
       }
-      if (saveTimer) flushSave();
-      const pending = L.nvMergePatch(nvQueued, nvDraft);
-      nvQueued = null;
-      nvDraft = null;
-      nvQueuedDone = [];
-      nvDraftDone = [];
-      if (!pending || !nvState) return;
-      pending.commit = true;
-      const v = L.nvValidatePatch(pending, nvState);
-      if (!v.ok) return;
-      const msg = Object.assign({ cmd: 'set' }, v.patch);
-      try {
-        if (!nvUseBridge && nvLink) nvLink.port.postMessage(Object.assign({ id: ++nvSeq }, msg));
-        else nvBridge(msg).catch(noop);
-      } catch (e) { /* 弹窗正在关闭 */ }
+      flushSave();
+      nv.flushNow();
     });
   }
 
@@ -1303,7 +1091,8 @@
     let savedTab = 'video';
     try {
       const r = await chrome.storage.local.get(['settings', NV_LAST_PRESET_KEY, NV_HOTKEY_ERROR_KEY, TAB_KEY, HDR_ONLY_KEY, SDR_LAST_KEY]);
-      settings = L.mergeSettings(r && r.settings);
+      stored = L.mergeSettings(r && r.settings);
+      settings = stored;
       nvLastPresetId = (r && r[NV_LAST_PRESET_KEY]) || null;
       hotkeyError = r && r[NV_HOTKEY_ERROR_KEY];
       savedTab = (r && r[TAB_KEY]) || 'video';
@@ -1322,7 +1111,7 @@
       const age = Date.now() - (+hotkeyError.at || 0);
       if (typeof hotkeyError.text === 'string' && age >= 0 && age < NV_HOTKEY_ERROR_MAX_AGE) nvMessage(hotkeyError.text.slice(0, 200), true);
     }
-    nvStart().catch(() => nvFailed(null)); // NVIDIA 设置与当前页面无关，chrome:// 页面也能用
+    nvStart().catch(() => nv.failed(null)); // NVIDIA 设置与当前页面无关，chrome:// 页面也能用
 
     if (!usable) {
       renderState(null);

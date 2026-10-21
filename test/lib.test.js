@@ -1489,6 +1489,23 @@ test('nvStateDiff / nvChangeText', () => {
   assert.ok(!L.nvChangeText(d).includes('\u00b7') && !L.nvChangeText(d, 'en').includes('\u00b7'));
 });
 
+test('nvPatchVals：页面补记的修改记录只算补丁写到的字段', () => {
+  // 拖饱和度期间借用归还、全局 HDR 变开，快捷键改了中间灰：这些不能算成弹窗的修改
+  const before = nvState({ hdr: { enabled: false, saturation: 0 } });
+  const after = nvState({ hdr: { enabled: true, saturation: -30, middleGrey: 70 } });
+  const patch = { hdr: { saturation: -30 }, commit: true };
+  assert.deepEqual(L.nvPatchVals(before, patch), { hdr: { saturation: 0 } });
+  const e = L.nvWriteEntry({ source: 'popup', at: 1000, before: L.nvPatchVals(before, patch), after: L.nvPatchVals(after, patch), patch: patch });
+  assert.deepEqual(e.before, { hdr: { saturation: 0 } });
+  assert.deepEqual(e.after, { hdr: { saturation: -30 } });
+  const undo = L.nvUndoPatch(e, after, null);
+  assert.deepEqual(undo.patch, { hdr: { saturation: 0 }, commit: true }, '撤销不碰 HDR 开关和中间灰');
+  assert.equal(L.nvPatchVals(null, patch), null);
+  assert.equal(L.nvPatchVals(before, null), null);
+  const frozen = Object.freeze({ hdr: Object.freeze({ saturation: -30 }) });
+  L.nvPatchVals(before, frozen);
+});
+
 const logEntry = (o) => Object.assign({ at: 1000, source: 'popup', ok: true, undoable: true, before: { hdr: { middleGrey: 65 } }, after: { hdr: { middleGrey: 70 } } }, o);
 
 test('nvLogEntry / nvLogAppend：规范化与环形上限', () => {
@@ -2146,6 +2163,191 @@ test('content.js 报告里的字段都经过 background 的 sanitizeReport', () 
     if (OUTSIDE.indexOf(f) >= 0) continue;
     assert.ok(new RegExp('\\bmsg\\.' + f + '\\b').test(s[0]), 'sanitizeReport 缺少 ' + f);
   }
+});
+
+// ---------- 1.3 P2：弹窗重构、设置只由 background 写 ----------
+
+test('mergeSettingsPatch：递归合并、保留网站表里的 null、数组整体替换、先后套用一致', () => {
+  const a = { osd: false, night: { start: '21:00' }, sites: { 'a.com': 'on', 'b.com': null }, nv: { presets: [preset('p1', 'x')] } };
+  const b = { night: { end: '07:00' }, sites: { 'a.com': null, 'c.com': 'off' }, nv: { followSdr: true, presets: [preset('p2', 'y')] } };
+  const sa = JSON.stringify(a), sb = JSON.stringify(b);
+  const m = L.mergeSettingsPatch(a, b);
+  assert.deepEqual(m, {
+    osd: false, night: { start: '21:00', end: '07:00' }, sites: { 'a.com': null, 'b.com': null, 'c.com': 'off' },
+    nv: { presets: [preset('p2', 'y')], followSdr: true }
+  });
+  assert.equal(JSON.stringify(a), sa, '不修改 a');
+  assert.equal(JSON.stringify(b), sb, '不修改 b');
+  m.night.start = 'x';
+  assert.equal(a.night.start, '21:00', '结果不和输入共享对象');
+  const cur = S({ sites: { 'a.com': 'off', 'b.com': 'on', 'd.com': 'on' }, nv: { presets: [preset('p0', 'z')] } });
+  assert.deepEqual(L.applySettingsPatch(cur, L.mergeSettingsPatch(a, b)), L.applySettingsPatch(L.applySettingsPatch(cur, a), b));
+  // 弹窗防抖：每次改动的最小补丁合并后，一次套用得到最后的设置
+  let s = cur, acc = null;
+  for (const mutate of [(x) => { x.osd = false; }, (x) => { delete x.sites['b.com']; }, (x) => { x.sites['b.com'] = 'off'; x.eye.minutes = 30; }, (x) => { x.osd = true; }]) {
+    const next = L.mergeSettings(s);
+    mutate(next);
+    acc = L.mergeSettingsPatch(acc, L.settingsPatchFor(s, next));
+    s = L.mergeSettings(next);
+  }
+  assert.deepEqual(L.applySettingsPatch(cur, acc), s);
+  assert.deepEqual(L.mergeSettingsPatch(null, { osd: true }), { osd: true });
+  assert.deepEqual(L.mergeSettingsPatch({ osd: true }, undefined), { osd: true });
+  assert.equal(L.mergeSettingsPatch(null, null), null);
+  assert.equal(L.mergeSettingsPatch('x', []), null);
+  const evil = L.mergeSettingsPatch({}, JSON.parse('{"__proto__": {"polluted": 1}}'));
+  assert.equal(({}).polluted, undefined);
+  assert.equal(evil.polluted, undefined);
+});
+
+// 去掉注释后的源码里 chrome.storage.local.set(...) / .remove(...) / .clear(...) 的参数；
+// 也认 const local = chrome.storage.local 这样的别名（content.js 就这么写）
+function storageWrites(src) {
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const out = [];
+  const names = ['\\bstorage\\.local'];
+  const alias = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:chrome\.)?storage\.local\s*[;,)\n]/g;
+  let m;
+  while ((m = alias.exec(code))) names.push('(?<![\\w$.])' + m[1].replace(/\$/g, '\\$') + '(?![\\w$])');
+  const re = new RegExp('(?:' + names.join('|') + ')\\s*\\.\\s*(set|remove|clear)\\s*\\(', 'g');
+  while ((m = re.exec(code))) {
+    let depth = 1, i = re.lastIndex;
+    for (; i < code.length && depth; i++) {
+      if (code[i] === '(') depth++;
+      else if (code[i] === ')') depth--;
+    }
+    out.push({ op: m[1], args: code.slice(re.lastIndex, i - 1).trim() });
+  }
+  return out;
+}
+
+// 某个文件里指 settings / profiles 键的名字：这两个字面量、background 的键常量，以及值为这两个字符串的常量
+function storageBadKeys(src) {
+  const names = ['settings', 'profiles', 'SETTINGS_KEY', 'PROFILES_KEY'];
+  const re = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(['"`])(?:settings|profiles)\2/g;
+  let m;
+  while ((m = re.exec(src))) names.push(m[1].replace(/\$/g, '\\$'));
+  return new RegExp('(?<![\\w$])(' + names.join('|') + ')(?![\\w$])');
+}
+
+test('只有 background.js 写 storage 的 settings 和 profiles', () => {
+  const hits = (src) => storageWrites(src).filter((w) => w.op === 'clear' || storageBadKeys(src).test(w.args));
+  // 扫描方法本身：旧弹窗、旧选项页的写法，别名、存了键名的常量、clear 都能被发现
+  assert.ok(hits("call(() => chrome.storage.local.set({ settings: settings })).catch(noop);").length);
+  assert.ok(storageWrites("await chrome.storage.local.set(items);").some((w) => w.op === 'set' && !w.args.startsWith('{')));
+  assert.ok(hits("chrome.storage.local.remove(['profiles'])").length);
+  assert.ok(hits("const local = chrome.storage.local;\nawait local.set({ settings: next });").length, '别名');
+  assert.ok(hits("const K = 'settings';\nchrome.storage.local.set({ [K]: s });").length, '值为 settings 的常量');
+  assert.ok(hits("chrome.storage.local.clear();").length, 'clear');
+  assert.ok(!hits("chrome.storage.local.set({ [TAB_KEY]: tab });").length);
+  assert.ok(!hits("const local = chrome.storage.local;\nlocal.remove(old);").length);
+  assert.equal(storageWrites("const local = chrome.storage.local;\nlocal.remove(old);").length, 1);
+  const files = fs.readdirSync(ROOT).filter((f) => /\.js$/.test(f) && f !== 'background.js');
+  assert.ok(['popup.js', 'options.js', 'content.js', 'nv-client.js', 'ui-kit.js'].every((f) => files.indexOf(f) >= 0), files.join());
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    const bad = storageBadKeys(src);
+    for (const w of storageWrites(src)) {
+      assert.ok(w.op !== 'clear', f + ' 清空了 storage.local');
+      assert.ok(!bad.test(w.args), f + ' 写了 settings / profiles：' + w.op + '(' + w.args + ')');
+      // set 的参数必须是字面量对象，看得出写的是哪些键
+      if (w.op === 'set') assert.ok(w.args.startsWith('{'), f + ' 的 set 参数不是字面量对象：' + w.args);
+    }
+  }
+  // 选项页导入备份交给 background（再检查一遍、在设置队列里覆盖）
+  const options = fs.readFileSync(path.join(ROOT, 'options.js'), 'utf8');
+  assert.equal(storageWrites(options).length, 0, 'options.js 不直接写 storage');
+  assert.ok(/type: 'backup', op: 'import'/.test(options));
+  const bg = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  assert.ok(/msg\.type === 'backup' && msg\.op === 'import'/.test(bg));
+  assert.ok(/function backupImport\(data\) \{\s*const res = L\.validateBackup\(data\);/.test(bg), 'background 再检查一遍备份');
+});
+
+test('弹窗：NVIDIA 通信在 nv-client.js，界面小工具在 ui-kit.js，共用样式在 ui-base.css', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
+  const scripts = Array.from(html.matchAll(/<script src="([^"]+)"/g), (m) => m[1]);
+  assert.deepEqual(scripts, ['i18n.js', 'lib.js', 'ui-kit.js', 'nv-client.js', 'popup.js']);
+  const css = Array.from(html.matchAll(/<link rel="stylesheet" href="([^"]+)"/g), (m) => m[1]);
+  assert.deepEqual(css, ['fonts/fonts.css', 'ui-base.css', 'popup.css']);
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const popup = strip(fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8'));
+  const client = strip(fs.readFileSync(path.join(ROOT, 'nv-client.js'), 'utf8'));
+  const kit = strip(fs.readFileSync(path.join(ROOT, 'ui-kit.js'), 'utf8'));
+  assert.ok(!/connectNative/.test(popup), '弹窗不自己开本地组件端口');
+  assert.ok(/connectNative/.test(client));
+  assert.ok(/globalThis\.RtxHdrNvClient\s*=/.test(client));
+  assert.ok(/type: 'nv-log'/.test(client), '自己端口上的写入补记进修改记录');
+  assert.ok(!/\bchrome\./.test(kit), 'ui-kit.js 不访问扩展接口');
+  assert.ok(!/innerHTML/.test(kit) && !/innerHTML/.test(client), '只用 createElement 建 DOM');
+  for (const k of ['setText', 'setClass', 'setNum', 'setAttr', 'sliderFill', 'signed', 'fillSelect', 'segment', 'sliderRow', 'applyTheme']) {
+    assert.ok(new RegExp('\\b' + k + ': ' + k + '\\b').test(kit), 'ui-kit 导出 ' + k);
+  }
+  // 套用预设、全局 HDR 开关、跟随 SDR 交给 background；设置改发补丁；弹窗不再自己记「上次套用的预设」
+  assert.ok(/op: 'apply-preset'/.test(popup));
+  assert.ok(/op: 'set', patch: patch, mode: 'suppress'/.test(popup));
+  assert.ok(/op: 'follow-check'/.test(popup));
+  assert.ok(/type: 'settings-patch'/.test(popup));
+  assert.ok(/L\.nvUnleased\(nv\.state, hdrOnlyStatus\)/.test(popup), '保存预设用借用前的开关');
+  assert.ok(!storageWrites(popup).some((w) => /NV_LAST_PRESET_KEY/.test(w.args)));
+  // 设计变量只在 ui-base.css 定义一份
+  const base = fs.readFileSync(path.join(ROOT, 'ui-base.css'), 'utf8');
+  const pcss = fs.readFileSync(path.join(ROOT, 'popup.css'), 'utf8');
+  assert.ok(/:root \{[\s\S]*--accent:/.test(base) && /prefers-color-scheme: dark/.test(base));
+  assert.ok(!/:root/.test(pcss), 'popup.css 不再定义变量');
+  for (const sel of ['.seg {', '.switch {', '.check {', '.btn {', '.link {', '.slider-row {', '.val {', 'input[type="range"] {', '.note {', '.sub {']) {
+    assert.ok(base.includes(sel), 'ui-base.css 缺少 ' + sel);
+    assert.ok(!pcss.includes('\n' + sel), 'popup.css 里还有 ' + sel);
+  }
+  // 盖在视频上的面板也会用这些样式：不能有 backdrop-filter / filter、transform，也不能有过渡和动画
+  const overVideo = (css, name) => {
+    const code = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.ok(!/(^|[\s;{])(-webkit-)?(backdrop-)?filter\s*:/m.test(code), name + ' 不用 filter / backdrop-filter');
+    assert.ok(!/(^|[\s;{])(-webkit-)?transform\s*:/m.test(code), name + ' 不用 transform');
+    assert.ok(!/(^|[\s;{])(-webkit-)?(transition|animation)[\w-]*\s*:/m.test(code), name + ' 不用过渡和动画');
+  };
+  // 检查方法本身
+  for (const css of ['.a { backdrop-filter: blur(4px); }', '.a{-webkit-backdrop-filter: blur(4px)}', '.a { filter: blur(1px); }',
+    '.a { transform: rotate(1deg); }', '.a { transition: opacity .2s; }', '.a { animation: x 1s; }']) {
+    assert.throws(() => overVideo(css, 'x'), css);
+  }
+  overVideo('.a { text-transform: uppercase; opacity: .45; }', 'x');
+  overVideo(base, 'ui-base.css');
+  if (fs.existsSync(path.join(ROOT, 'panel.css'))) overVideo(fs.readFileSync(path.join(ROOT, 'panel.css'), 'utf8'), 'panel.css');
+});
+
+test('ui-kit：signed、sliderFill、setText / setNum 只在变了时写', () => {
+  const vm = require('node:vm');
+  const ctx = { RtxHdrLib: L };
+  ctx.globalThis = ctx;
+  vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'ui-kit.js'), 'utf8'), ctx);
+  const U = ctx.RtxHdrUi;
+  assert.equal(U.signed(5), '+5');
+  assert.equal(U.signed(0), '0');
+  assert.equal(U.signed(-3), '-3');
+  const fake = (min, max, value) => {
+    const props = {};
+    return { min: String(min), max: String(max), value: String(value), style: { setProperty: (k, v) => { props[k] = v; } }, props: props };
+  };
+  let el = fake(10, 100, 55);
+  U.sliderFill(el);
+  assert.deepEqual(el.props, { '--a': '0%', '--b': '50%' });
+  el = fake(-100, 100, -50);
+  U.sliderFill(el);
+  assert.deepEqual(el.props, { '--a': '25%', '--b': '50%' }, '正负对称的从中点填充');
+  el = fake(-100, 100, 100);
+  U.sliderFill(el);
+  assert.deepEqual(el.props, { '--a': '50%', '--b': '100%' });
+  let writes = 0;
+  const node = { _t: 'a', get textContent() { return this._t; }, set textContent(v) { writes++; this._t = v; } };
+  assert.equal(U.setText(node, 'a'), node);
+  assert.equal(writes, 0);
+  U.setText(node, 'b');
+  assert.equal(writes, 1);
+  const input = { value: '5' };
+  U.setNum(input, 5);
+  assert.equal(input.value, '5');
+  U.setNum(input, 6);
+  assert.equal(input.value, '6');
 });
 
 // ---------- 运行 ----------

@@ -440,6 +440,25 @@
     return diffSettings(mergeSettings(prev), mergeSettings(next), '');
   }
 
+  function joinPatch(a, b) {
+    const out = {};
+    for (const k of Object.keys(a)) if (k !== '__proto__') out[k] = a[k];
+    for (const k of Object.keys(b)) {
+      if (k === '__proto__') continue;
+      out[k] = isObj(b[k]) && isObj(out[k]) ? joinPatch(out[k], b[k]) : clone(b[k]);
+    }
+    return out;
+  }
+
+  /**
+   * 两个补丁合并成一个（b 在后）：对象递归合并，网站表里的 null（删除）照样保留，数组和标量整体替换。
+   * 先套 a 再套 b 与套一次合并结果相同。两个都不是对象时返回 null；不修改输入
+   */
+  function mergeSettingsPatch(a, b) {
+    if (!isObj(a) && !isObj(b)) return null;
+    return joinPatch(isObj(a) ? clone(a) : {}, isObj(b) ? b : {});
+  }
+
   // 播放器 frame（内容脚本、面板）能改的字段；网站相关的只能改顶层页面自己那一条
   const CONTENT_PATCH_FIELDS = Object.freeze({
     autoDetect: AUTO_MODES,
@@ -1469,6 +1488,16 @@
     return any ? out : null;
   }
 
+  // state 里补丁写到的那些字段（NvVals，新对象）：页面补记的修改记录只算它自己写的字段，
+  // 不把这期间别的写入方（借用、快捷键、跟随 SDR 等）改的字段算进来。参数不合法返回 null
+  function nvPatchVals(state, patch) {
+    const a = nvVals(state), want = nvVals(patch);
+    if (!a || !want) return null;
+    const out = {};
+    for (const f of NV_FIELDS) if (nvGet(want, f) !== undefined && nvGet(a, f) !== undefined) nvSet(out, f, nvGet(a, f));
+    return out;
+  }
+
   /**
    * 修改记录的一条 → 规范化的新对象；不合法（来源未知、没有时间）返回 null：
    * {id, at, source, label?, ok, error?:{code,field?,errorCode?,written?}, before?, after?, want?,
@@ -2279,6 +2308,7 @@
     SITE_RULES: SITE_RULES,
     applySettingsPatch: applySettingsPatch,
     settingsPatchFor: settingsPatchFor,
+    mergeSettingsPatch: mergeSettingsPatch,
     contentPatchAllowed: contentPatchAllowed,
     // 1.3：观看
     PEEK_HOLD_MS: PEEK_HOLD_MS,
@@ -2304,6 +2334,7 @@
     nvAutoGuard: nvAutoGuard,
     nvPatchDelta: nvPatchDelta,
     nvStateDiff: nvStateDiff,
+    nvPatchVals: nvPatchVals,
     nvLogEntry: nvLogEntry,
     nvNormLog: nvNormLog,
     nvLogAppend: nvLogAppend,

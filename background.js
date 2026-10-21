@@ -26,6 +26,9 @@ const NV_TIMEOUT_MS = 10000;
 const NV_ALARM = 'nv-schedule';
 const NV_PHASE_KEY = 'nvLastPhase';
 const NV_LAST_PRESET_KEY = 'nvLastPresetId';
+// 配置档（只由 background 写）；导入备份时清掉的 session 记录：网站预设当前的套用、配置档切换的撤销
+const PROFILES_KEY = 'profiles';
+const BACKUP_CLEAR_SESSION = ['nvSite', 'profileUndo'];
 const NV_HOTKEY_ERROR_KEY = 'nvHotkeyError';
 // 定时套用预设失败时下一分钟再试；这些错误重试也没用，本时段放弃
 const NV_GIVE_UP = new Set(['no-dll', 'host-forbidden', 'bad-request', 'range']);
@@ -381,7 +384,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
     if (prev.nv.followSdr !== settingsCache.nv.followSdr || prev.nv.displayId !== settingsCache.nv.displayId) {
       nvSyncFollowAlarm(settingsCache);
-      if (settingsCache.nv.followSdr) nvFollowCheck();
+      // 刚打开跟随：忘掉上次调过的白电平，按当前白电平立刻调一次
+      if (settingsCache.nv.followSdr && !prev.nv.followSdr) call(() => chrome.storage.local.remove(SDR_LAST_KEY)).catch(noop).then(nvFollowCheck);
+      else if (settingsCache.nv.followSdr) nvFollowCheck();
     }
     if (prev.hdrOnly !== settingsCache.hdrOnly) {
       hoCaps = null; // 重新探测本地组件
@@ -465,6 +470,29 @@ function settingsTxn(mutator) {
     if (JSON.stringify(cur) !== JSON.stringify(next)) await chrome.storage.local.set({ settings: next });
     settingsCache = next;
     return next;
+  });
+  settingsQueue = run.then(noop, noop);
+  return run;
+}
+
+// 备份导入（选项页读文件、预览后发来原始内容）：这里再检查一遍，和其他设置写入排在同一个队列里整体覆盖。
+// 先删掉现有的视频记忆和时段 / 跟随 / 上次预设的记录，再写入备份的设置、视频记忆和配置档（备份里有才覆盖）；
+// session 里网站预设的记录和配置档的撤销一并清掉。回复 {ok, settings, summary} 或 {ok:false, code}
+function backupImport(data) {
+  const res = L.validateBackup(data);
+  if (!res.ok) return Promise.resolve({ ok: false, code: res.code });
+  const run = settingsQueue.then(async () => {
+    const all = await chrome.storage.local.get(null);
+    const old = Object.keys(all).filter((k) => k.indexOf(L.VIDEO_PREFIX) === 0);
+    old.push(NV_PHASE_KEY, SDR_LAST_KEY, NV_LAST_PRESET_KEY);
+    await chrome.storage.local.remove(old);
+    const items = { settings: res.settings };
+    for (const k of Object.keys(res.videos)) items[L.VIDEO_PREFIX + k] = res.videos[k];
+    if (res.profiles) items[PROFILES_KEY] = res.profiles;
+    await chrome.storage.local.set(items);
+    settingsCache = res.settings;
+    await call(() => chrome.storage.session.remove(BACKUP_CLEAR_SESSION)).catch(noop);
+    return { ok: true, settings: res.settings, summary: res.summary };
   });
   settingsQueue = run.then(noop, noop);
   return run;
@@ -1337,8 +1365,12 @@ async function nvLogFromPage(msg, page) {
   if (!before || (msg.after != null && !after) || !v.ok) return { ok: false, code: 'bad-request' };
   const e = msg.error;
   const error = e && typeof e === 'object' && typeof e.code === 'string' && e.code ? e : null;
+  // 页面的「改前」是它上次读到的状态，中间可能被别的写入方改过：前后值只留这次补丁写到的字段，
+  // 借用期间的开关换回借用前的值（同 nvWriteLocked）
+  const lease = hoLeaseInfo();
+  const pick = (st) => L.nvPatchVals(L.nvUnleased(st, lease), v.patch);
   const logId = await nvLogWrite({
-    source: nvPageSource(page), before: before, after: error ? null : after, patch: v.patch,
+    source: nvPageSource(page), before: pick(before), after: error || !after ? null : pick(after), patch: v.patch,
     error: error, unconfirmed: !error && msg.unconfirmed === true
   });
   return { ok: true, logId: logId };
@@ -1426,6 +1458,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'nv-log' && (page === 'popup' || (page === 'panel' && patchRateOk(sender.tab.id)))) {
     nvLogFromPage(msg, page).then(sendResponse, (e) => sendResponse(internalError(e)));
+    return true;
+  }
+
+  if (msg.type === 'backup' && msg.op === 'import' && page && page !== 'panel') {
+    backupImport(msg.data).then(sendResponse, (e) => sendResponse({ ok: false, code: 'internal', message: String((e && e.message) || e) }));
     return true;
   }
 
