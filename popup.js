@@ -304,7 +304,8 @@
     setText('state-key', key).hidden = !key || pending;
     const reason = L.reasonText(st.reason, lang);
     setText('state-reason', reason ? t('video.reason', { reason: reason }) : '');
-    const hdrOnly = !!(hdrOnlyStatus && hdrOnlyStatus.active);
+    // 这个视频是借全局开关关的（超分保留）还是加滤镜关的；旧内容脚本没有 hdrOnly 字段
+    const hdrOnly = typeof st.hdrOnly === 'boolean' ? st.hdrOnly : !!(hdrOnlyStatus && hdrOnlyStatus.active);
     setText('state-extra', pending || on ? '' : t(hdrOnly ? 'video.vsrKept' : 'video.vsrOffToo'));
 
     const note = st.pip ? t('video.pip') : '';

@@ -1104,6 +1104,17 @@ test('nvMgStep：±5 夹到 10..100', () => {
   assert.equal(L.nvMgStep(null, 5), null);
 });
 
+test('hdrOnlyApplies：只对借开关时看的那个标签页和 frame 生效', () => {
+  const st = { active: true, leased: true, tabId: 7, frameId: 0 };
+  assert.equal(L.hdrOnlyApplies(st, 7, 0), true);
+  assert.equal(L.hdrOnlyApplies(st, 8, 0), false, '另一个窗口的标签页照常加滤镜');
+  assert.equal(L.hdrOnlyApplies(st, 7, 3), false, '同一标签页里别的 frame');
+  assert.equal(L.hdrOnlyApplies(st, -1, -1), false, '还不知道自己在哪：先按滤镜处理');
+  assert.equal(L.hdrOnlyApplies({ active: false, leased: false }, 7, 0), false);
+  assert.equal(L.hdrOnlyApplies({ active: true, leased: false }, 7, 0), false, '1.2 早期的状态没有 tabId');
+  assert.equal(L.hdrOnlyApplies(null, 7, 0), false);
+});
+
 // ---------- 备份 ----------
 
 test('备份：导出只带设置和视频记忆，导入前检查', () => {

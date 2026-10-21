@@ -661,6 +661,13 @@
     return 0;
   }
 
+  // 「只关 HDR」对这个 frame 生效吗：模式在工作，而且 background 借开关时看的就是它
+  // （当前窗口当前标签页里有主视频的 frame）。其他窗口里想关的视频照常加滤镜。
+  function hdrOnlyApplies(status, tabId, frameId) {
+    return !!(isObj(status) && status.active === true && Number.isInteger(tabId) && tabId >= 0 &&
+      status.tabId === tabId && status.frameId === frameId);
+  }
+
   // entries: storage 对象或 [key, value] 数组；返回需要删除的 v: 键（最旧的先删）
   function pruneKeys(entries, max) {
     const limit = typeof max === 'number' && max >= 0 ? Math.floor(max) : MAX_VIDEO_ENTRIES;
@@ -1137,6 +1144,7 @@
     createAutoDetector: createAutoDetector,
     pickPrimary: pickPrimary,
     pickBestFrame: pickBestFrame,
+    hdrOnlyApplies: hdrOnlyApplies,
     pruneKeys: pruneKeys,
     formatLuma: formatLuma,
     offFilterFor: offFilterFor,

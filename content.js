@@ -73,7 +73,10 @@
   let uiLanguage = '';
   try { uiLanguage = chrome.i18n.getUILanguage(); } catch (e) { uiLanguage = navigator.language || ''; }
   let lang = 'zh';
-  let hdrOnly = false; // 「只关 HDR」模式生效中：想关的视频不加滤镜，由 background 关掉全局 HDR
+  let hdrOnly = false; // 「只关 HDR」对本 frame 生效：想关的主视频不加滤镜，由 background 关掉全局 HDR
+  let hdrOnlyStatus = null; // background 写的 {active, leased, tabId, frameId}
+  let selfTab = -1; // 本 frame 所在的标签页和 frame，background 回复报告时告诉我们
+  let selfFrame = -1;
   let settingsTouched = false;
   let eyeRestAt = 0; // 护眼 SDR 开始的时间（0 = 没有）
   let eyeRestTouched = false;
@@ -381,8 +384,8 @@
     const st = v.style;
     const ds = v.dataset;
     if (!st || !ds) return;
-    // 「只关 HDR」模式：视频仍走 overlay（超分保留），HDR 由 background 关掉全局开关来关
-    const state = want === 'off' && hdrOnly ? 'on' : want;
+    // 「只关 HDR」模式：主视频仍走 overlay（超分保留），HDR 由 background 关掉全局开关来关
+    const state = want === 'off' && hdrOnly && v === primary ? 'on' : want;
     if (state === 'off') {
       if (!isOurs(st)) {
         const orig = st.getPropertyValue('filter');
@@ -1378,8 +1381,25 @@
     if (info.decisionKey === keyOf(info) && info.eff === 'on') eyePending.hdr += dt;
   }
 
+  // 「只关 HDR」只管 background 借开关时看的那个 frame；变了返回 true
+  function updateHdrOnly() {
+    const next = L.hdrOnlyApplies(hdrOnlyStatus, selfTab, selfFrame);
+    if (next === hdrOnly) return false;
+    hdrOnly = next;
+    return true;
+  }
+
   const onReply = guard(function (res) {
-    if (!res || !res.remind) return;
+    if (!res) return;
+    if (Number.isInteger(res.tabId) && Number.isInteger(res.frameId) && (res.tabId !== selfTab || res.frameId !== selfFrame)) {
+      selfTab = res.tabId;
+      selfFrame = res.frameId;
+      if (updateHdrOnly()) {
+        quietNext = true; // 视频该开该关没变，只是换了关的方法
+        scheduleEvaluate();
+      }
+    }
+    if (!res.remind) return;
     const m = res.remind;
     showOsd(L.eyeReminderText(m.minutes, !!m.autoOff, typeof m.shortcut === 'string' ? m.shortcut : '', lang),
       EYE_OSD_MS, primary, true);
@@ -1512,11 +1532,9 @@
       dirty = true;
     }
     if (changes[HDR_ONLY_KEY]) {
-      const v = changes[HDR_ONLY_KEY].newValue;
-      const next = !!(v && v.active);
+      hdrOnlyStatus = changes[HDR_ONLY_KEY].newValue || null;
       hdrOnlyTouched = true;
-      if (next !== hdrOnly) {
-        hdrOnly = next;
+      if (updateHdrOnly()) {
         quietNext = true; // 视频该开该关没变，只是换了关的方法
         dirty = true;
       }
@@ -1722,7 +1740,10 @@
     // onChanged 先到的话以它为准
     if (!settingsTouched) settings = L.mergeSettings(r && r.settings);
     if (!eyeRestTouched) eyeRestAt = L.eyeRestAt(r && r[L.EYE_REST_KEY]);
-    if (!hdrOnlyTouched) hdrOnly = !!(r && r[HDR_ONLY_KEY] && r[HDR_ONLY_KEY].active);
+    if (!hdrOnlyTouched) {
+      hdrOnlyStatus = (r && r[HDR_ONLY_KEY]) || null;
+      updateHdrOnly();
+    }
     updateLang();
   })).then(() => {
     settingsReady = true;

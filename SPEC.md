@@ -227,11 +227,11 @@
 **中间灰快捷键**：`nv-mg-up` / `nv-mg-down`（建议 `Alt+Shift+Up` / `Alt+Shift+Down`），读当前值 ±5 夹到 10..100 再写，到头只提示。四个建议快捷键正好用满 Chrome 的上限。
 
 **只关 HDR，保留超分（`hdrOnly`）**：实测页面层面没有办法只关某个视频的 HDR（`dynamic-range-limit` 对 overlay 路径无效；`swap_chain_presenter.cc` 里 auto HDR 只看片源是否 SDR、显示器是否 HDR、驱动、是否用电池），但播放中切换 NVIDIA 全局 HDR 开关（0x318 enabled 位）0.1–0.3 秒内生效、超分不受影响、白色正好落到 SDR 白（实测 996.5 → 480.2 尼特，和页面自身的白一致）。所以这个模式下：
-- 内容脚本不给想关的视频加滤镜（视频仍走 overlay，超分保留），只照常上报决策；
+- 内容脚本只在 background 借开关时看的那个 frame 里，不给想关的主视频加滤镜（视频仍走 overlay，超分保留），只照常上报决策；内容脚本从报告的回复里得知自己的 `tabId` / `frameId`。其他窗口、其他 frame 里想关的视频照常加滤镜，全局 HDR 开着时它们也真的是 SDR（`lib.js` 的 `hdrOnlyApplies`）；
 - background 看当前窗口的当前标签页：主视频想关（不是 DRM）就通过常驻的 `connectNative` 端口向本地组件 `hdrLease on:true` 借用全局开关，否则 `on:false` 还回去并断开端口；
 - 本地组件在端口断开（浏览器退出或崩溃、扩展重载）时自己把开关恢复；
 - 用户在弹窗里亲手改全局 HDR 时，弹窗让 background `hdrLease on:false, restore:false` 放手，这个视频不再借；
-- 状态写在 `storage.local` 的 `hdrOnlyStatus`（`{active, leased, error?}`）：`active` 为真时内容脚本才不加滤镜；本地组件不支持（没有 `caps: hdrLease`）或借用失败时 `active` 为假，退回逐视频滤镜，60 秒后再试。
+- 状态写在 `storage.local` 的 `hdrOnlyStatus`（`{active, leased, tabId, frameId, error?}`）：`active` 为真、`tabId` / `frameId` 是自己时内容脚本才不加滤镜；本地组件不支持（没有 `caps: hdrLease`）或借用失败时 `active` 为假，退回逐视频滤镜，60 秒后再试。
 - 代价写在界面上：关的是全局 HDR，同时播放的其他视频也会变成 SDR。
 
 **备份**：选项页 `options.html`（文件选择框会关掉弹窗，所以放在单独的页面）。导出 `{format:'rtx-hdr-switch-backup', version:1, exportedAt, extensionVersion, settings, videos}`，只含设置和按视频的记忆；导入前 `validateBackup` 检查格式和版本、按 `mergeSettings` 规范化、视频记忆超过 2000 条只留最新的，显示摘要，确认后覆盖。
