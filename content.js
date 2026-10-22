@@ -1152,7 +1152,8 @@
       before: ['.quality-wrap', '.ext-nodes'],
       append: true,
       rebuild: '#web-player-controller-wrap-el',
-      // webFull 还没量到（真网站被人机验证挡住）：网页全屏暂时不算全屏
+      // 「网页模式」给 body 加 player-full-win（顶层直播间实测；/blanc/ iframe 形态没测）
+      webFull: 'body.player-full-win',
       panelZ: 2147483000,
       make: makeBiliLiveButton
     },

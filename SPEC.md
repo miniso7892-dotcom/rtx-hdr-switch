@@ -327,7 +327,7 @@
 - `isFullscreenFor(v)` 只对主视频求值：
   1. 有全屏元素（沿各级 shadowRoot 找真正的全屏元素）时，看它是否包含视频（YouTube 的全屏元素是 `<html>`，也成立）；
   2. 没有全屏元素、不是顶层 frame、收到了 `fs-hint`、本 frame 视口不小于屏幕面积的 1/4 时，算全屏（1/4 防止「退出」通知丢失时小尺寸嵌入一直被当成全屏）；
-  3. `settings.fullscreenWeb` 开着、`PLAYER_BARS[site].webFull` 存在且 `v.closest(webFull)` 命中时算全屏（网页全屏）。目前只有 B 站：`.bpx-player-container[data-screen="web"]`；B 站直播的网页全屏还没测到，不算；
+  3. `settings.fullscreenWeb` 开着、`PLAYER_BARS[site].webFull` 存在且 `v.closest(webFull)` 命中时算全屏（网页全屏）。B 站：`.bpx-player-container[data-screen="web"]`；B 站直播：`body.player-full-win`（「网页模式」，顶层直播间实测，`/blanc/` iframe 形态没测）；
   4. 画中画和浏览器 F11 全屏都不算。
 - 父页面把 iframe 设为全屏：顶层 frame 的报告带 `fsFrame`（有全屏元素、它不包含顶层自己的主视频，并且它本身是 iframe 或里面有占视口一半以上的 iframe）。background 用 `L.fsHintTarget` 选出目标子 frame（某个新鲜的子 frame 自己报告了全屏时不选），变化时 `tabs.sendMessage(tabId, {type:'fs-hint', on}, {frameId})` 通知旧目标 off、新目标 on；报告回复里另带 `topFs` 作为兜底（心跳 3 s）。只转发顶层到它的子 frame，更深的嵌套不支持。
 - 报告里的 `fullscreen` 改为「本 frame 的全屏元素包含主视频」。

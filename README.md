@@ -168,7 +168,7 @@ Switch the language at the top right: 中 / EN / Auto (follows the browser). The
 ### Viewing
 
 - **Hold to compare**: see [Player button](#player-button). In the panel, **Hold to compare** works while you hold it.
-- **HDR only in fullscreen**: choose **Fullscreen** under *When no rule applies*, or **Fullscreen only** as a site rule. The video is SDR while windowed and HDR in fullscreen, including a player embedded in another page that the page puts in fullscreen. Bilibili's web fullscreen counts as fullscreen while *Count web fullscreen as fullscreen* is checked. Picture-in-picture and the browser's own F11 fullscreen don't count.
+- **HDR only in fullscreen**: choose **Fullscreen** under *When no rule applies*, or **Fullscreen only** as a site rule. The video is SDR while windowed and HDR in fullscreen, including a player embedded in another page that the page puts in fullscreen. Web fullscreen on Bilibili and Bilibili Live counts as fullscreen while *Count web fullscreen as fullscreen* is checked. Picture-in-picture and the browser's own F11 fullscreen don't count.
 - **Keep for this tab**: when you switch the next video the same way as the previous one, the label on the video offers *Keep for the next videos in this tab* for 4 s; click it, or check the same option in the panel. Autoplay, playlists and multi-part videos in that tab then follow your choice until you reload the page, forget the video, or uncheck it.
 
 ### Theme color
@@ -327,7 +327,7 @@ Installs from the Chrome Web Store update by themselves. Unpacked installs (load
 - In element fullscreen (`video.requestFullscreen()`), the on-screen label is hidden behind the browser's fullscreen layer. Site players' own fullscreen modes are fine.
 - Browser-internal pages (`chrome://`, the extension stores) are not supported.
 - **Hold to compare** can't compare while *Turn off HDR only* has global HDR off: there is no HDR to compare with. Comparing from HDR to SDR uses the per-video filter, so VSR is off while you hold.
-- **HDR only in fullscreen** follows fullscreen one level deep: a page that puts an embedded player into fullscreen is detected, a player nested two iframes deep isn't. Bilibili Live's web fullscreen doesn't count as fullscreen yet. With *Turn off HDR only* on, entering and leaving fullscreen switches global HDR each time.
+- **HDR only in fullscreen** follows fullscreen one level deep: a page that puts an embedded player into fullscreen is detected, a player nested two iframes deep isn't. With *Turn off HDR only* on, entering and leaving fullscreen switches global HDR each time.
 - A remembered choice beats *fullscreen only*: after you toggle a video by hand it keeps that state in and out of fullscreen. Use **Follow rules** in the panel or **Forget** in the popup to hand it back.
 - **Keep for this tab** lasts until the page reloads or navigates to a new page.
 - The player panel only appears where the HDR button does. In a YouTube embed on another site, the panel accepts changes only while the browser confirms it is fully visible.

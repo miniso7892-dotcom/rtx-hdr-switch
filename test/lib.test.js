@@ -2520,8 +2520,9 @@ test('content.js 仅全屏：主视频按全屏判定，fs-hint 与 topFs，白�
   assert.ok(/res\.topFs/.test(fnBody(src, 'onReply')), 'onReply 处理 topFs');
   assert.ok(/r\.fsFrame = fsFrameNow\(\)/.test(fnBody(src, 'buildReport')), '顶层报告带 fsFrame');
   assert.ok(/r\.fsFrame/.test(fnBody(src, 'report')), '报告签名含 fsFrame');
-  // B 站网页全屏
+  // B 站网页全屏；B 站直播的「网页模式」
   assert.ok(/webFull: '\.bpx-player-container\[data-screen="web"\]'/.test(src));
+  assert.ok(/webFull: 'body\.player-full-win'/.test(src));
   const bg = srcOf('background.js');
   assert.ok(/fsFrame: !!msg\.fsFrame/.test(bg), 'sanitizeReport 保留 fsFrame');
   assert.ok(/type: 'fs-hint', on: on/.test(bg) && /L\.fsHintTarget\(/.test(bg), 'background 推送 fs-hint');
