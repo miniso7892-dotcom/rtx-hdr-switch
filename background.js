@@ -26,9 +26,18 @@ const NV_TIMEOUT_MS = 10000;
 const NV_ALARM = 'nv-schedule';
 const NV_PHASE_KEY = 'nvLastPhase';
 const NV_LAST_PRESET_KEY = 'nvLastPresetId';
-// 配置档（只由 background 写）；导入备份时清掉的 session 记录：网站预设当前的套用、配置档切换的撤销
+// 配置档（只由 background 写）；导入备份时清掉的 session 记录：配置档切换的撤销
 const PROFILES_KEY = 'profiles';
-const BACKUP_CLEAR_SESSION = ['nvSite', 'profileUndo'];
+const PROFILE_UNDO_KEY = 'profileUndo';
+const BACKUP_CLEAR_SESSION = [PROFILE_UNDO_KEY];
+// 网站预设当前的套用（storage.local：浏览器退出、扩展更新后还能恢复进入前的值；导入备份时清掉）
+const NV_SITE_KEY = 'nvSite';
+// 按网站切换 NVIDIA 预设：去抖、宽限期结束时叫醒 service worker 的一次性闹钟、套用失败后隔多久再试同一网站
+const NV_SITE_ALARM = 'nv-site';
+const NV_SITE_DEBOUNCE_MS = 2000;
+const NV_SITE_RETRY_MS = 60000;
+// 面板能用的配置档操作（扩展页面都能用）
+const PANEL_PROFILE_OPS = new Set(['list', 'apply', 'next', 'undo', 'save']);
 const NV_HOTKEY_ERROR_KEY = 'nvHotkeyError';
 // 定时套用预设失败时下一分钟再试；这些错误重试也没用，本时段放弃
 const NV_GIVE_UP = new Set(['no-dll', 'host-forbidden', 'bad-request', 'range']);
@@ -341,6 +350,7 @@ async function handleReport(msg, sender) {
   schedulePersist(tabId);
   await refreshBadge(tabId, t);
   if (settingsCache && settingsCache.hdrOnly) hoSchedule();
+  siteSchedule(false);
   // 告诉内容脚本它在哪个标签页、哪个 frame：「只关 HDR」只对借开关时看的那个 frame 生效；
   // 子 frame 还会知道父页面是不是把它设为了全屏（推送丢了时的兜底）
   const reply = { tabId: tabId, frameId: frameId };
@@ -532,6 +542,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
       if (settingsCache.nv.followSdr && !prev.nv.followSdr) call(() => chrome.storage.local.remove(SDR_LAST_KEY)).catch(noop).then(nvFollowCheck);
       else if (settingsCache.nv.followSdr) nvFollowCheck();
     }
+    // 网站绑定或预设列表变了：网站预设重新判断（绑定被删、预设被删时恢复）
+    if (JSON.stringify(prev.nv.sitePresets) !== JSON.stringify(settingsCache.nv.sitePresets) ||
+      JSON.stringify(prev.nv.presets) !== JSON.stringify(settingsCache.nv.presets)) siteSchedule(true);
     if (prev.hdrOnly !== settingsCache.hdrOnly) {
       hoCaps = null; // 重新探测本地组件
       hoRetryAt = 0;
@@ -587,6 +600,7 @@ async function handleCommand(command, tab) {
   if (command === 'nv-mg-up') return nvMgHotkey(MG_STEP);
   if (command === 'nv-mg-down') return nvMgHotkey(-MG_STEP);
   if (command === 'nv-undo') return nvUndoHotkey();
+  if (command === 'next-profile') return profileNextHotkey();
   if (!tab || !validTabId(tab.id)) tab = await activeTab();
   const tabId = tab && validTabId(tab.id) ? tab.id : null;
   // 「开/关 自动检测」只改设置，直接在这里做（页面上没有内容脚本时也能用），提示显示在当前标签页的视频上
@@ -625,10 +639,15 @@ function settingsTxn(mutator) {
 function backupImport(data) {
   const res = L.validateBackup(data);
   if (!res.ok) return Promise.resolve({ ok: false, code: res.code });
+  // 配置档的锁在外、设置队列在内（和套用配置档的顺序相同，不会互相等）
+  return profilesTxn(() => backupImportLocked(res));
+}
+
+function backupImportLocked(res) {
   const run = settingsQueue.then(async () => {
     const all = await chrome.storage.local.get(null);
     const old = Object.keys(all).filter((k) => k.indexOf(L.VIDEO_PREFIX) === 0);
-    old.push(NV_PHASE_KEY, SDR_LAST_KEY, NV_LAST_PRESET_KEY);
+    old.push(NV_PHASE_KEY, SDR_LAST_KEY, NV_LAST_PRESET_KEY, NV_SITE_KEY);
     await chrome.storage.local.remove(old);
     const items = { settings: res.settings };
     for (const k of Object.keys(res.videos)) items[L.VIDEO_PREFIX + k] = res.videos[k];
@@ -636,6 +655,7 @@ function backupImport(data) {
     await chrome.storage.local.set(items);
     settingsCache = res.settings;
     await call(() => chrome.storage.session.remove(BACKUP_CLEAR_SESSION)).catch(noop);
+    siteKnown = null;
     return { ok: true, settings: res.settings, summary: res.summary };
   });
   settingsQueue = run.then(noop, noop);
@@ -983,7 +1003,10 @@ async function nvWriteLocked(req) {
     error: ok ? null : (res && res.error) || { code: 'host-error' }, undoOf: req.undoOf
   });
   if (!ok) return Object.assign({ ok: false, error: { code: 'host-error' } }, res, { stage: 'set', logId: logId });
-  return { ok: true, state: res.state, diff: L.nvStateDiff(before, after), logId: logId };
+  const diff = L.nvStateDiff(before, after);
+  // 网站预设生效期间用户亲手改了参数：这个网站不再重新套用，离开时只恢复没被改过的
+  if (user && diff) siteMarkManual();
+  return { ok: true, state: res.state, diff: diff, logId: logId };
 }
 
 // 套用预设：最高亮度夹到实时范围；HDR 出错（Windows 没开 HDR、显示器休眠或还没重新识别等）时只写超分，
@@ -1347,11 +1370,14 @@ function hoDrop() {
 
 chrome.tabs.onActivated.addListener(() => {
   if (settingsCache && settingsCache.hdrOnly) hoSchedule();
+  siteSchedule(true);
 });
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
   // 焦点离开浏览器（WINDOW_ID_NONE）时保持现状
-  if (windowId !== chrome.windows.WINDOW_ID_NONE && settingsCache && settingsCache.hdrOnly) hoSchedule();
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  if (settingsCache && settingsCache.hdrOnly) hoSchedule();
+  siteSchedule(true);
 });
 
 function nvScheduled(s) {
@@ -1397,6 +1423,8 @@ async function nvScheduleOnce() {
   const s = await getSettings();
   await nvSyncAlarm(s);
   if (!nvScheduled(s)) return;
+  // 网站预设生效期间不按时段切换，也不记时段：离开网站时再按时段处理（siteLeave）
+  if (await siteRecordGet()) return;
   const phase = L.nvSchedulePhase(s.night, L.minutesOfDay(Date.now()));
   const id = (phase === 'night' ? s.nv.nightPresetId : s.nv.dayPresetId) || null;
   const r = await chrome.storage.local.get(NV_PHASE_KEY);
@@ -1448,6 +1476,7 @@ function nvScheduleCheck() {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm && alarm.name === NV_ALARM) nvScheduleCheck();
   else if (alarm && alarm.name === NV_FOLLOW_ALARM) nvFollowCheck();
+  else if (alarm && alarm.name === NV_SITE_ALARM) siteEvaluate();
 });
 
 // 浏览器启动：主题色图标、跟随 SDR 的闹钟、「只关 HDR」的状态（上次的借用在浏览器退出时已由本地组件还掉）
@@ -1462,7 +1491,426 @@ async function onBrowserStart() {
 chrome.runtime.onStartup.addListener(() => {
   nvScheduleCheck();
   onBrowserStart().catch(noop);
+  // 上次退出前网站预设还在生效：重新判断（不在绑定网站上播放就恢复进入前的值）
+  siteSchedule(true);
 });
+
+// ---------- 按网站切换 NVIDIA 预设 ----------
+// 焦点标签页的主视频在绑定的网站上播放时套用那个预设；离开（换到别的网站、没有视频超过宽限期、绑定被删）时
+// 只把实时值仍等于写入值的参数恢复成进入前的值。当前的套用记在 storage.local（nvSite），service worker 重启、浏览器重开后接着用。
+// 2 秒去抖，同一时间只跑一个判断（写法同 hoEvaluate）
+
+let siteTimer = 0;
+let siteWaitTimer = 0;
+let siteRunning = null;
+let siteAgain = false;
+let siteKnown = null; // storage.local 里有没有网站预设的记录（null：还没读过）
+let siteFail = null; // {host, presetId, at}：上次套用失败的网站和预设，NV_SITE_RETRY_MS 内不再试
+let siteFailShown = ''; // 已经提示过的失败（网站、预设、错误）：之后的重试不再提示，成功后清掉
+
+function siteRecordGet() {
+  return call(() => chrome.storage.local.get(NV_SITE_KEY)).then((r) => {
+    const v = r && r[NV_SITE_KEY];
+    return v && typeof v === 'object' && typeof v.host === 'string' && v.host ? v : null;
+  }, () => null);
+}
+
+function siteRecordSet(rec) {
+  siteKnown = !!rec;
+  return call(() => (rec ? chrome.storage.local.set({ [NV_SITE_KEY]: rec }) : chrome.storage.local.remove(NV_SITE_KEY))).catch(noop);
+}
+
+// 有绑定或者有生效中的记录时才需要判断
+function siteWanted() {
+  if (settingsCache && Object.keys(settingsCache.nv.sitePresets).length) return true;
+  return siteKnown !== false;
+}
+
+// reset：切换标签页、窗口等（重新计时）；报告只在没有排着的判断时排一次，连续的心跳不会把判断一直往后推
+function siteSchedule(reset) {
+  if (!siteWanted() || (siteTimer && !reset)) return;
+  clearTimeout(siteTimer);
+  siteTimer = setTimeout(() => {
+    siteTimer = 0;
+    siteEvaluate();
+  }, NV_SITE_DEBOUNCE_MS);
+}
+
+function siteEvaluate() {
+  if (siteRunning) {
+    siteAgain = true;
+    return siteRunning;
+  }
+  siteRunning = (async () => {
+    do {
+      siteAgain = false;
+      await siteEvaluateOnce().catch(noop);
+    } while (siteAgain);
+    siteRunning = null;
+  })();
+  return siteRunning;
+}
+
+// 当前窗口当前标签页的主视频：顶层页面的域名（只认 http / https）和最佳 frame 的报告
+async function siteTarget() {
+  const tab = await activeTab();
+  if (!tab || !validTabId(tab.id)) return null;
+  let topHost = '';
+  try {
+    const u = new URL(tab.url || '');
+    if (u.protocol === 'https:' || u.protocol === 'http:') topHost = L.normalizeHost(u.hostname);
+  } catch (e) {
+    topHost = '';
+  }
+  if (!topHost) return null;
+  const best = bestFrame(await getTab(tab.id));
+  const r = best && best.report;
+  const has = !!(r && r.hasVideo);
+  return { topHost: topHost, frameHost: (r && r.hostname) || topHost, hasVideo: has, playing: has && !!r.playing };
+}
+
+function sitePhase(s, now) {
+  return L.nvSchedulePhase(s.night, L.minutesOfDay(now));
+}
+
+async function siteEvaluateOnce() {
+  const s = await getSettings();
+  const rec = await siteRecordGet();
+  siteKnown = !!rec;
+  if (!rec && !Object.keys(s.nv.sitePresets).length) return;
+  const now = Date.now();
+  const d = L.nvSiteDecide({
+    record: rec,
+    target: await siteTarget(),
+    sitePresets: s.nv.sitePresets,
+    presetIds: s.nv.presets.map((p) => p.id),
+    now: now
+  });
+  if (d.action === 'none') {
+    // 还在看：更新 seenAt（最多 5 秒写一次）
+    if (rec && typeof d.at === 'number' && d.at - (+rec.seenAt || 0) >= 5000) await siteRecordSet(Object.assign({}, rec, { seenAt: d.at }));
+    return;
+  }
+  if (d.action === 'wait') return siteWait(d.at);
+  if (d.action === 'apply') return siteApply(s, rec, d, now);
+  return siteLeave(s, rec);
+}
+
+// 宽限期结束时再看一次：内存里的计时器，加一个 service worker 被回收后也能叫醒它的一次性闹钟
+function siteWait(at) {
+  clearTimeout(siteWaitTimer);
+  siteWaitTimer = setTimeout(() => siteSchedule(true), Math.max(0, at - Date.now()) + 200);
+  return call(() => chrome.alarms.create(NV_SITE_ALARM, { when: at + 1000 })).catch(noop);
+}
+
+// host：提示里带着这个网站，只发给还停在这个网站上的活动标签页（写入期间可能已经换了标签页）；null 时不限
+async function siteOsd(s, host, text, warn) {
+  if (!warn && !s.osd) return;
+  if (host) {
+    const t = await siteTarget().catch(() => null);
+    if (!t || (t.topHost !== host && L.normalizeHost(t.frameHost) !== host)) return;
+  }
+  await hotkeyOsd(text, warn);
+}
+
+async function siteApply(s, rec, d, now) {
+  const preset = s.nv.presets.find((p) => p.id === d.presetId);
+  if (!preset) return;
+  if (siteFail && siteFail.host === d.host && siteFail.presetId === d.presetId && now - siteFail.at < NV_SITE_RETRY_MS) return;
+  const lang = langOf(s);
+  let memo = null;
+  let st0 = null;
+  const res = await nvWrite({
+    source: 'site',
+    label: d.host,
+    lease: 'yield',
+    build: (st, lease) => {
+      st0 = st;
+      const patch = L.nvAutoGuard(L.nvPresetPatch(preset, st), s, 'site');
+      if (!patch || !(patch.hdr || patch.vsr)) return null;
+      memo = { before: L.nvUnleased(st, lease), patch: patch };
+      return patch;
+    }
+  });
+  if (res.ok !== true || !memo) {
+    siteFail = { host: d.host, presetId: d.presetId, at: now };
+    const err = res.empty && st0 && st0.hdr.supported && st0.hdr.error ? { code: 'hdr-error', errorCode: st0.hdr.error } : res.error;
+    // 同一网站、同一预设、同一种错误只提示一次，之后的重试和时段预设一样不出声
+    const sig = JSON.stringify([d.host, d.presetId, err && err.code, err && err.errorCode]);
+    if (sig === siteFailShown) return;
+    siteFailShown = sig;
+    await siteOsd(s, d.host, L.t(lang, 'bg.siteFailed', { err: L.nvErrorText(err, lang) }), true);
+    return;
+  }
+  siteFail = null;
+  siteFailShown = '';
+  // 从绑定网站 A 换到 B：保留 A 的 base（进入第一个绑定网站前的值）
+  const record = L.nvSiteRecord(rec, memo.before, memo.patch, { host: d.host, presetId: d.presetId, phase: sitePhase(s, now), now: now });
+  if (record) await siteRecordSet(record);
+  if (!res.noop) {
+    const partial = !!(st0 && st0.hdr.supported && st0.hdr.error);
+    await siteOsd(s, d.host, L.t(lang, 'bg.site', { host: d.host, name: preset.name }) + (partial ? L.t(lang, 'nv.partial') : ''), partial);
+  }
+}
+
+// 离开：进入时的时段已经过去、新时段选了预设、这个时段还没套用过（配置档会预写时段），并且期间没有手动改过时，
+// 套用时段预设（并记下时段）；否则恢复没被改过的参数，时段变了就记下新时段，免得时段检查再盖掉。最后删掉记录
+async function siteLeave(s, rec) {
+  const now = Date.now();
+  const phase = sitePhase(s, now);
+  const id = nvScheduled(s) ? (phase === 'night' ? s.nv.nightPresetId : s.nv.dayPresetId) || null : null;
+  const moved = !!id && !!rec.phase && rec.phase !== phase;
+  let done = false;
+  if (moved) {
+    const r = await call(() => chrome.storage.local.get(NV_PHASE_KEY)).catch(() => null);
+    const last = nvPhaseRecord(r && r[NV_PHASE_KEY]);
+    done = !!last && last.phase === phase && last.id === id;
+  }
+  const preset = moved && !done && rec.manual !== true ? s.nv.presets.find((p) => p.id === id) : null;
+  let res;
+  if (preset) {
+    res = await nvApplyPreset(preset, false, 'schedule');
+    if (res.ok === true) {
+      const r = res.hdrSkipped ? { phase: phase, id: id, hdrPending: true } : { phase: phase, id: id };
+      await call(() => chrome.storage.local.set({ [NV_PHASE_KEY]: r })).catch(noop);
+    }
+  } else {
+    if (moved && !done) await call(() => chrome.storage.local.set({ [NV_PHASE_KEY]: { phase: phase, id: id } })).catch(noop);
+    res = await nvWrite({ source: 'site', label: 'restore', lease: 'yield', build: (st, lease) => L.nvSiteRestorePatch(rec, st, lease) });
+  }
+  await siteRecordSet(null);
+  clearTimeout(siteWaitTimer);
+  await call(() => chrome.alarms.clear(NV_SITE_ALARM)).catch(noop);
+  if (!preset && res.ok === true && !res.noop) await siteOsd(s, null, L.t(langOf(s), 'bg.siteRestore'), false);
+}
+
+// 用户亲手改了 NVIDIA 参数（nvWrite 的用户来源、弹窗和面板补记的修改）
+function siteMarkManual() {
+  if (siteKnown === false) return;
+  siteRecordGet().then((rec) => {
+    siteKnown = !!rec;
+    if (rec && !rec.manual) return siteRecordSet(Object.assign({}, rec, { manual: true }));
+  }).catch(noop);
+}
+
+// ---------- 配置档（只由 background 写 profiles） ----------
+// 保存、套用、下一个、撤销（10 分钟内）、重命名、删除、导入都在 profilesTxn 里排队。
+// 锁的顺序：配置档在外，设置队列（settingsTxn）和 NVIDIA 写入（nvTxn）在内；设置和 NVIDIA 那边不会反过来等配置档
+
+let profilesQueue = Promise.resolve();
+
+function profilesTxn(fn) {
+  const run = profilesQueue.then(() => fn());
+  profilesQueue = run.then(noop, noop);
+  return run;
+}
+
+async function profilesRead() {
+  const r = await call(() => chrome.storage.local.get(PROFILES_KEY)).catch(() => null);
+  return L.normProfiles(r && r[PROFILES_KEY]);
+}
+
+async function profilesWrite(ps) {
+  const next = L.normProfiles(ps);
+  await chrome.storage.local.set({ [PROFILES_KEY]: next });
+  return next;
+}
+
+async function profileUndoGet() {
+  const r = await call(() => chrome.storage.session.get(PROFILE_UNDO_KEY)).catch(() => null);
+  const u = r && r[PROFILE_UNDO_KEY];
+  return L.profileUndoValid(u, Date.now()) ? u : null;
+}
+
+function profileUndoSet(u) {
+  return call(() => (u ? chrome.storage.session.set({ [PROFILE_UNDO_KEY]: u }) : chrome.storage.session.remove(PROFILE_UNDO_KEY))).catch(noop);
+}
+
+function profileNewId(list) {
+  const ids = new Set(list.map((p) => p.id));
+  let id;
+  do id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  while (ids.has(id));
+  return id;
+}
+
+// 回复：全部配置档（弹窗算「已修改」、复制为文本要用完整内容）和 10 分钟内还能撤销的那次切换
+async function profilesView(ps, extra) {
+  const u = await profileUndoGet();
+  return Object.assign({ ok: true, profiles: ps, undo: u ? { at: u.at, id: u.id, name: u.name } : null }, extra);
+}
+
+// 套用或撤销会改夜间时段、并且带 NVIDIA 参数时：按新设置先记下当前时段，onChanged 触发的时段检查不会把刚写的参数覆盖掉
+async function profilePrePhase(next, now) {
+  if (!next || !nvScheduled(next)) return;
+  const phase = sitePhase(next, now);
+  const id = (phase === 'night' ? next.nv.nightPresetId : next.nv.dayPresetId) || null;
+  await call(() => chrome.storage.local.set({ [NV_PHASE_KEY]: { phase: phase, id: id } })).catch(noop);
+}
+
+// {name, sites, nv, overwrite}：同名且没说覆盖时回 exists（界面据此做两步确认）
+function profileSave(msg) {
+  const name = L.nvName(msg.name);
+  if (!name) return Promise.resolve({ ok: false, code: 'name' });
+  return profilesTxn(async () => {
+    const cur = await profilesRead();
+    const same = cur.list.find((p) => p.name === name);
+    if (same && msg.overwrite !== true) return { ok: false, code: 'exists', name: name };
+    if (!same && cur.list.length >= L.PROFILES_MAX) return { ok: false, code: 'max' };
+    let nvState = null;
+    let lease = null;
+    if (msg.nv === true) {
+      // 在锁里读一次，和借用状态对得上（借用期间存借用前的开关）
+      const got = await nvTxn(async () => ({ res: await hostCall({ cmd: 'get' }), lease: hoLeaseInfo() }));
+      nvState = got.res && got.res.ok === true ? L.nvNormState(got.res.state) : null;
+      if (!nvState) return { ok: false, code: 'nv-unavailable', error: (got.res && got.res.error) || { code: 'host-error' } };
+      lease = got.lease;
+    }
+    // 排在已经提交的设置补丁后面读
+    const s = await settingsTxn((c) => c);
+    const p = L.profileFromCurrent(s, nvState, {
+      id: same ? same.id : profileNewId(cur.list), name: name, now: Date.now(), sites: msg.sites === true, nv: msg.nv === true, lease: lease
+    });
+    if (!p) return { ok: false, code: 'invalid' };
+    const up = L.profileUpsert(cur.list, p);
+    if (up.code) return { ok: false, code: up.code };
+    const next = await profilesWrite({ v: 1, list: up.list, activeId: up.id });
+    return profilesView(next, { id: up.id, name: name, overwrote: up.overwrote });
+  });
+}
+
+// 套用：先记撤销信息，再换设置，再写 NVIDIA 参数（借用按 yield），最后记下当前配置档。
+// 回复带 hdrSkipped（HDR 不可用，NVIDIA 部分只写了超分等）和 nvError（设置已切换、NVIDIA 参数没写成）
+async function profileApplyLocked(id) {
+  const cur = await profilesRead();
+  const p = cur.list.find((x) => x.id === id);
+  if (!p) return { ok: false, code: 'not-found' };
+  const now = Date.now();
+  const s0 = await settingsTxn((c) => c);
+  const undo = L.profileUndoRecord(s0, p, cur.activeId, now);
+  await profileUndoSet(undo);
+  if (p.nv) await profilePrePhase(L.profileApply(s0, p), now);
+  await settingsTxn((c) => L.profileApply(c, p));
+  let hdrSkipped = false;
+  let nvError = null;
+  if (p.nv) {
+    let st0 = null;
+    let memo = null;
+    const res = await nvWrite({
+      source: 'profile',
+      label: p.name,
+      lease: 'yield',
+      build: (st, lease) => {
+        st0 = st;
+        const patch = L.profileNvPatch(p, st);
+        if (patch) memo = L.nvWriteMemo(null, L.nvUnleased(st, lease), patch);
+        return patch;
+      }
+    });
+    hdrSkipped = !!(st0 && st0.hdr.supported && st0.hdr.error);
+    if (res.ok !== true && !res.empty) nvError = res.error || { code: 'host-error' };
+    if (res.ok === true && memo) {
+      undo.nv = memo;
+      await profileUndoSet(undo);
+    }
+  }
+  const next = await profilesWrite({ v: 1, list: cur.list, activeId: p.id });
+  return profilesView(next, { id: p.id, name: p.name, hdrSkipped: hdrSkipped, nvError: nvError });
+}
+
+function profileApplyOp(id) {
+  if (typeof id !== 'string' || !id) return Promise.resolve({ ok: false, code: 'not-found' });
+  return profilesTxn(() => profileApplyLocked(id));
+}
+
+// 下一个：从当前配置档的下一个开始轮换（没有当前的从第一个开始）
+function profileNext() {
+  return profilesTxn(async () => {
+    const cur = await profilesRead();
+    if (!cur.list.length) return { ok: false, code: 'none' };
+    return profileApplyLocked(L.nvNextPresetId(cur.list, cur.activeId));
+  });
+}
+
+// 撤销最近一次切换（10 分钟内）：设置部分整体换回；NVIDIA 部分只恢复实时值仍等于当时写入值的参数；当前配置档换回切换前的
+function profileUndo() {
+  return profilesTxn(async () => {
+    const u = await profileUndoGet();
+    if (!u) return { ok: false, code: 'expired' };
+    await profileUndoSet(null);
+    if (u.nv) await profilePrePhase(L.profileUndoApply(await settingsTxn((c) => c), u), Date.now());
+    await settingsTxn((c) => L.profileUndoApply(c, u));
+    let nvError = null;
+    if (u.nv) {
+      const res = await nvWrite({ source: 'undo', label: u.name, lease: 'yield', build: (st, lease) => L.nvSiteRestorePatch(u.nv, st, lease) });
+      if (res.ok !== true && !res.empty) nvError = res.error || { code: 'host-error' };
+    }
+    const cur = await profilesRead();
+    const prev = cur.list.some((p) => p.id === u.prevActiveId) ? u.prevActiveId : null;
+    const next = await profilesWrite({ v: 1, list: cur.list, activeId: prev });
+    return profilesView(next, { name: u.name, nvError: nvError });
+  });
+}
+
+function profileRenameOp(id, name) {
+  return profilesTxn(async () => {
+    const r = L.profileRename(await profilesRead(), id, name);
+    if (r.code) return { ok: false, code: r.code };
+    return profilesView(await profilesWrite(r.profiles), { name: L.nvName(name) });
+  });
+}
+
+function profileDeleteOp(id) {
+  return profilesTxn(async () => {
+    const r = L.profileRemove(await profilesRead(), id);
+    if (r.code) return { ok: false, code: r.code };
+    return profilesView(await profilesWrite(r.profiles));
+  });
+}
+
+// 导入（粘贴的文本、配置档文件）：这里再规范化一遍，合并进现有的，重名改名、换新 id
+function profileImport(list) {
+  if (!Array.isArray(list)) return Promise.resolve({ ok: false, code: 'invalid' });
+  return profilesTxn(async () => {
+    const cur = await profilesRead();
+    const m = L.profilesMerge(cur.list, list.slice(0, 200), Date.now());
+    if (!m.added.length) return { ok: false, code: cur.list.length >= L.PROFILES_MAX ? 'max' : 'empty', dropped: m.dropped };
+    const next = await profilesWrite({ v: 1, list: m.list, activeId: cur.activeId });
+    return profilesView(next, { added: m.added, dropped: m.dropped });
+  });
+}
+
+// {type:'profile', op, …}。面板只能用 PANEL_PROFILE_OPS
+function profileHandle(msg) {
+  switch (msg.op) {
+    case 'list': return profilesTxn(async () => profilesView(await profilesRead()));
+    case 'save': return profileSave(msg);
+    case 'apply': return profileApplyOp(msg.id);
+    case 'next': return profileNext();
+    case 'undo': return profileUndo();
+    case 'rename': return profileRenameOp(msg.id, msg.name);
+    case 'delete': return profileDeleteOp(msg.id);
+    case 'import': return profileImport(msg.profiles);
+    default: return Promise.resolve({ ok: false, code: 'bad-request' });
+  }
+}
+
+// 套用结果的提示文字；只套用了一部分、NVIDIA 参数没写成时算警告
+function profileResultText(res, lang) {
+  if (res.nvError) return { text: L.t(lang, 'bg.profileNvFailed', { name: res.name, err: L.nvErrorText(res.nvError, lang) }), warn: true };
+  if (res.hdrSkipped) return { text: L.t(lang, 'bg.profilePartial', { name: res.name }), warn: true };
+  return { text: L.t(lang, 'bg.profile', { name: res.name }), warn: false };
+}
+
+// 快捷键：切换到下一个配置档，在当前视频上提示
+async function profileNextHotkey() {
+  const res = await profileNext().catch((e) => ({ ok: false, error: { code: 'internal', message: String((e && e.message) || e) } }));
+  const lang = langOf(await getSettings());
+  if (res.code === 'none') return hotkeyOsd(L.t(lang, 'bg.profileNone'), true);
+  if (res.ok !== true) return hotkeyOsd(L.t(lang, 'bg.profileFailed', { err: L.nvErrorText(res.error || { code: res.code || 'internal' }, lang) }), true);
+  const r = profileResultText(res, lang);
+  return hotkeyOsd(r.text, r.warn);
+}
 
 // ---------- 扩展页面的 NVIDIA 请求 ----------
 
@@ -1519,6 +1967,7 @@ async function nvLogFromPage(msg, page) {
     source: nvPageSource(page), before: pick(before), after: error || !after ? null : pick(after), patch: v.patch,
     error: error, unconfirmed: !error && msg.unconfirmed === true
   });
+  if (logId !== null && !error && after) siteMarkManual();
   return { ok: true, logId: logId };
 }
 
@@ -1619,6 +2068,15 @@ function onRuntimeMessage(msg, sender, sendResponse) {
     return true;
   }
 
+  if (msg.type === 'profile' && page) {
+    if (page === 'panel' && (!PANEL_PROFILE_OPS.has(msg.op) || (msg.op !== 'list' && !patchRateOk(sender.tab.id)))) {
+      sendResponse({ ok: false, code: PANEL_PROFILE_OPS.has(msg.op) ? 'busy' : 'bad-request' });
+      return false;
+    }
+    profileHandle(msg).then(sendResponse, (e) => sendResponse(internalError(e)));
+    return true;
+  }
+
   if (msg.type === 'backup' && msg.op === 'import' && page && page !== 'panel') {
     backupImport(msg.data).then(sendResponse, (e) => sendResponse({ ok: false, code: 'internal', message: String((e && e.message) || e) }));
     return true;
@@ -1661,7 +2119,8 @@ async function injectOpenTabs() {
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
-  initSettings().catch(noop).then(nvScheduleCheck).then(() => onBrowserStart()).catch(noop);
+  // 扩展更新或重新加载前网站预设还在生效：同样重新判断
+  initSettings().catch(noop).then(nvScheduleCheck).then(() => onBrowserStart()).catch(noop).then(() => siteSchedule(true));
   const reason = details && details.reason;
   if (reason === 'install' || reason === 'update') injectOpenTabs().catch(noop);
 });
@@ -1671,11 +2130,15 @@ chrome.runtime.onInstalled.addListener((details) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   forgetTab(tabId);
   if (settingsCache && settingsCache.hdrOnly) hoSchedule();
+  // 关掉的是活动标签页时 onActivated 会重新计时；这里只在没有排着的判断时排一次
+  siteSchedule(false);
 });
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => forgetTab(removedTabId));
 
 // 整页导航时 Chrome 会清掉该 tab 的角标，缓存也要作废
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo && changeInfo.status === 'loading') badgeSig.delete(tabId);
+  // 活动标签页的网址变了（含单页应用换页）：网站预设重新判断。后台标签页频繁改网址不能把判断一直往后推
+  if (changeInfo && changeInfo.url && tab && tab.active) siteSchedule(true);
 });

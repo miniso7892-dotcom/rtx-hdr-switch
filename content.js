@@ -123,7 +123,7 @@
   let lastReportAt = 0;
   let everReported = false;
   let osdEl = null;
-  let osdText = null; // 放文字的节点（closed shadow root 里的 span；不支持 shadow root 时就是 osdEl 本身）
+  let osdText = null; // 放文字的节点（closed shadow root 里的 span）
   let osdMark = null;
   let osdBtn = null;  // 提议「本标签页沿用」时显示的按钮（closed shadow root 里）
   let osdKind = '';   // 当前提示的种类：'' 普通，'peek' 对比标记，'offer' 带按钮的提议
@@ -822,9 +822,12 @@
           osdEl.addEventListener(t, onOsdPointer);
         }
       } catch (e) {
-        osdText = osdEl;
+        // 建不了 shadow root（页面抢先定义了同名元素等）：不显示，文字不能落进页面读得到的 DOM
+        osdEl = null;
+        osdText = null;
         osdMark = null;
         osdBtn = null;
+        return;
       }
     }
     const offer = k === 'offer' && !!osdBtn;

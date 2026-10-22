@@ -18,6 +18,7 @@
   const HDR_ONLY_KEY = 'hdrOnlyStatus'; // background 写：{active, leased, prevEnabled?, error?}
   const NV_LAST_PRESET_KEY = 'nvLastPresetId';
   const PROFILES_KEY = 'profiles';
+  const PROFILE_UNDO_KEY = 'profileUndo'; // background 写（storage.session）：10 分钟内可以撤销的配置档切换
   const NV_POLL_MS = 2000;
   const NV_IDLE_MS = 20000; // 面板收起这么久后断开本地组件端口
   const ACTIVITY_MS = 500;
@@ -48,6 +49,9 @@
   let openSeq = 0;
   let profilesOn = false; // background 支持配置档（profile list 有回复）
   let profiles = null; // {list, activeId}
+  let pfUndo = null; // {at, id, name}：10 分钟内还能撤销的配置档切换
+  let pfUndoTimer = 0;
+  let pfOverwrite = null; // 已提示过「将覆盖」的同名配置档，再保存一次才覆盖
   let tab = 'video';
   let activityAt = 0;
   let peekOn = false;
@@ -651,6 +655,7 @@
     const src = r && r.ok === true ? (r.profiles && typeof r.profiles === 'object' ? r.profiles : r) : null;
     const list = src && Array.isArray(src.list) ? src.list : null;
     profilesOn = !!list;
+    pfUndo = r && r.undo && typeof r.undo.at === 'number' ? r.undo : null;
     profiles = list ? {
       list: list.filter((p) => p && typeof p.id === 'string' && typeof p.name === 'string').slice(0, PROFILES_MAX),
       activeId: typeof src.activeId === 'string' ? src.activeId : null
@@ -661,18 +666,16 @@
   }
 
   function renderProfiles() {
+    const left = pfUndo ? pfUndo.at + L.PROFILE_UNDO_MS - Date.now() : 0;
+    $('pf-undo').hidden = !(left > 0);
+    clearTimeout(pfUndoTimer);
+    if (left > 0) pfUndoTimer = setTimeout(renderProfiles, left + 100);
     const box = $('pf-list');
     const list = profiles ? profiles.list : [];
     const sig = JSON.stringify([list.map((p) => [p.id, p.name]), profiles && profiles.activeId, lang]);
     if (sig === profileSig) return;
     profileSig = sig;
     box.textContent = '';
-    if (!list.length) {
-      const e = document.createElement('span');
-      e.className = 'empty';
-      e.textContent = t('profile.none');
-      box.appendChild(e);
-    }
     for (const p of list) {
       const b = document.createElement('button');
       b.type = 'button';
@@ -685,16 +688,32 @@
     }
   }
 
+  // 要读写 NVIDIA 参数的操作：先把面板自己端口上的修改发完，期间暂停自己的写入，回来后重新读一次
+  function profileNvMsg(op, extra) {
+    return nv.mode === 'ready' ? nv.exclusive(() => profileMsg(op, extra)) : profileMsg(op, extra);
+  }
+
   async function applyProfile(p) {
-    const r = await profileMsg('apply', { id: p.id });
+    const r = await (p.nv ? profileNvMsg('apply', { id: p.id }) : profileMsg('apply', { id: p.id }));
     if (!r || r.ok !== true) message('pf-msg', profileError(r), true);
+    else if (r.nvError) message('pf-msg', t('bg.profileNvFailed', { name: p.name, err: L.nvErrorText(r.nvError, lang) }), true);
+    else if (r.hdrSkipped) message('pf-msg', t('bg.profilePartial', { name: p.name }), true);
     else message('pf-msg', t('profile.applied', { name: p.name }));
+    loadProfiles();
+  }
+
+  async function undoProfile() {
+    const r = await profileNvMsg('undo');
+    if (!r || r.ok !== true) message('pf-msg', profileError(r), true);
+    else if (r.nvError) message('pf-msg', L.nvErrorText(r.nvError, lang), true);
+    else message('pf-msg', t('profile.undone'));
     loadProfiles();
   }
 
   function showProfileForm(show) {
     $('pf-form').hidden = !show;
     $('pf-save').setAttribute('aria-expanded', String(show));
+    pfOverwrite = null;
     if (!show) return;
     const input = $('pf-name');
     input.value = t('profile.defaultName', { n: (profiles ? profiles.list.length : 0) + 1 });
@@ -708,8 +727,17 @@
       message('pf-msg', t('profile.err.name'), true);
       return;
     }
-    const r = await profileMsg('save', { name: name });
+    // 面板里保存的配置档：行为设置，本地组件可用时加上 NVIDIA 参数；同名的先提示，再保存一次才覆盖
+    const withNv = nv.mode === 'ready' && !!nv.state;
+    const req = { name: name, sites: false, nv: withNv, overwrite: pfOverwrite === L.nvName(name) };
+    const r = await (withNv ? profileNvMsg('save', req) : profileMsg('save', req));
     if (!r || r.ok !== true) {
+      if (r && r.code === 'exists') {
+        pfOverwrite = L.nvName(name);
+        message('pf-msg', t('profile.overwrite', { name: pfOverwrite }), true);
+        $('pf-name').focus();
+        return;
+      }
       message('pf-msg', profileError(r), true);
       return;
     }
@@ -721,6 +749,10 @@
   function bindProfiles() {
     $('pf-save').addEventListener('click', (e) => { if (act(e)) showProfileForm($('pf-form').hidden); });
     $('pf-ok').addEventListener('click', (e) => { if (act(e)) saveProfile(); });
+    $('pf-undo').addEventListener('click', (e) => { if (act(e)) undoProfile(); });
+    $('pf-name').addEventListener('input', (e) => {
+      if (e.isTrusted) pfOverwrite = null;
+    });
     $('pf-name').addEventListener('keydown', (e) => {
       if (e.isComposing || !act(e)) return; // 输入法选词时的回车不算
       if (e.key === 'Enter') {
@@ -823,6 +855,8 @@
   function bindStorage() {
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
+        // 收起时 background 不回面板的消息：打开时 onOpen 会重新读
+        if (area === 'session' && changes[PROFILE_UNDO_KEY] && ready && open && profilesOn) loadProfiles();
         if (area !== 'local') return;
         if (changes[HDR_ONLY_KEY]) {
           hdrOnlyStatus = changes[HDR_ONLY_KEY].newValue || null;
@@ -838,7 +872,7 @@
           renderVideo();
           renderNv();
         }
-        if (changes[PROFILES_KEY] && ready && profilesOn) loadProfiles();
+        if (changes[PROFILES_KEY] && ready && open && profilesOn) loadProfiles();
       });
     } catch (e) { /* ignore */ }
   }

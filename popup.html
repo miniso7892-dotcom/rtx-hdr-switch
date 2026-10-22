@@ -233,6 +233,35 @@
 
     <!-- ================= 规则 ================= -->
     <section class="panel" id="panel-rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+      <section class="block profiles" aria-labelledby="pf-title">
+        <div class="block-head">
+          <h2 id="pf-title" data-i18n="profile.title">配置档</h2>
+          <button type="button" class="link" id="pf-undo" data-i18n="profile.undo" hidden>撤销切换</button>
+        </div>
+        <ul class="pf-list" id="pf-list" aria-labelledby="pf-title"></ul>
+        <div class="pf-row" id="pf-buttons">
+          <button type="button" class="btn small" id="pf-save" aria-expanded="false" aria-controls="pf-form" data-i18n="profile.save">保存当前为配置档…</button>
+          <button type="button" class="btn small" id="pf-paste" aria-expanded="false" aria-controls="pf-paste-form" data-i18n="profile.paste">粘贴导入</button>
+        </div>
+        <div class="pf-form" id="pf-form" hidden>
+          <input type="text" class="pf-input" id="pf-name" maxlength="24" aria-label="配置档名称" data-i18n-attr="aria-label:profile.name" enterkeyhint="done" autocomplete="off">
+          <label class="check check-inline"><input type="checkbox" id="pf-sites"><span data-i18n="profile.includeSites">包含网站规则</span></label>
+          <label class="check check-inline"><input type="checkbox" id="pf-nv"><span data-i18n="profile.includeNv">包含 NVIDIA 参数</span></label>
+          <div class="pf-row">
+            <button type="button" class="btn small accent" id="pf-save-ok" data-i18n="profile.saveOk">保存</button>
+            <button type="button" class="btn small" id="pf-save-cancel" data-i18n="common.cancel">取消</button>
+          </div>
+        </div>
+        <div class="pf-form" id="pf-paste-form" hidden>
+          <textarea class="pf-input" id="pf-text" rows="3" spellcheck="false" autocomplete="off" aria-label="配置档文本" data-i18n-attr="aria-label:profile.text"></textarea>
+          <div class="pf-row">
+            <button type="button" class="btn small accent" id="pf-import" data-i18n="profile.import">导入</button>
+            <button type="button" class="btn small" id="pf-paste-cancel" data-i18n="common.cancel">取消</button>
+          </div>
+        </div>
+        <p class="pf-msg" id="pf-msg" role="status" aria-live="polite"></p>
+      </section>
+
       <section class="block theme" aria-labelledby="theme-title">
         <div class="block-head">
           <h2 id="theme-title" data-i18n="theme.title">主题色</h2>
@@ -292,6 +321,11 @@
         <span class="select"><select id="nv-day-preset" aria-describedby="nv-schedule-hint"></select></span>
       </div>
       <p class="note" id="nv-schedule-hint"></p>
+      <div class="row">
+        <label for="nv-site-preset"><span data-i18n="site.nvPreset">本网站套用</span> <span class="host" id="nv-site-host"></span></label>
+        <span class="select"><select id="nv-site-preset"></select></span>
+      </div>
+      <ul class="site-binds" id="nv-site-list" hidden></ul>
 
       <label class="check row-check"><input type="checkbox" id="eye-autooff"><span data-i18n="rules.eyeAutoOff">看久提醒到时自动切回 SDR</span></label>
       <label class="check row-check"><input type="checkbox" id="remember-manual"><span data-i18n="rules.remember">手动切换后记住此视频</span></label>

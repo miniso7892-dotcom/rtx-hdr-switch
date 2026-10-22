@@ -1765,11 +1765,55 @@
     return { action: 'leave', host: rec.host };
   }
 
-  // 离开绑定网站时恢复：只恢复实时值仍等于 record.wrote 的字段（回到 record.base）；没有要恢复的返回 null
-  function nvSiteRestorePatch(record, state) {
+  // 离开绑定网站时恢复：只恢复实时值仍等于 record.wrote 的字段（回到 record.base）；没有要恢复的返回 null。
+  // lease（可省略，同 nvUnleased）：借用期间 hdr.enabled 和借用前的值比较
+  function nvSiteRestorePatch(record, state, lease) {
     if (!isObj(record)) return null;
-    const r = nvRevertFields(record.base, record.wrote, state);
+    const r = nvRevertFields(record.base, record.wrote, state, lease);
     return r ? r.patch : null;
+  }
+
+  /**
+   * 一次写入留下的「写之前的值 / 写了什么」，给离开网站时恢复、撤销配置档切换用：
+   * base 保留 prev.base 里已有的（第一次写之前的值），只补上这次新写的字段；wrote 是 prev.wrote 叠加这次补丁的值。
+   * before：写入前的状态（借用期间用借用前的开关）；patch：这次要写的完整补丁（去重前）。
+   * 返回 {base, wrote}（NvVals，新对象）；参数不合法返回 null
+   */
+  function nvWriteMemo(prev, before, patch) {
+    const b = nvVals(before), w = nvVals(patch);
+    if (!b || !w) return null;
+    const p = isObj(prev) ? prev : {};
+    const base = nvVals(p.base) || {};
+    const wrote = nvVals(p.wrote) || {};
+    for (const f of NV_FIELDS) {
+      const x = nvGet(w, f);
+      if (x === undefined) continue;
+      if (nvGet(base, f) === undefined && nvGet(b, f) !== undefined) nvSet(base, f, nvGet(b, f));
+      nvSet(wrote, f, x);
+    }
+    return { base: base, wrote: wrote };
+  }
+
+  /**
+   * 网站预设写入成功后的记录（storage.local 的 nvSite）。从绑定网站 A 换到 B 时 prev 是 A 的记录：
+   * 保留 A 的 base（进入第一个绑定网站前的值），只补上 B 多写的字段。
+   * info: {host, presetId, phase, now}。返回 {host, presetId, phase, at, seenAt, base, wrote, manual:false}；不合法返回 null
+   */
+  function nvSiteRecord(prev, before, patch, info) {
+    const o = isObj(info) ? info : {};
+    const m = nvWriteMemo(prev, before, patch);
+    if (!m || typeof o.host !== 'string' || !o.host || typeof o.presetId !== 'string' || !NV_ID_RE.test(o.presetId)) return null;
+    const now = typeof o.now === 'number' && isFinite(o.now) ? o.now : 0;
+    return {
+      host: o.host,
+      presetId: o.presetId,
+      phase: o.phase === 'night' || o.phase === 'day' ? o.phase : null,
+      at: now,
+      seenAt: now,
+      base: m.base,
+      wrote: m.wrote,
+      manual: false
+    };
   }
 
   // ---------- 配置档 ----------
@@ -1996,6 +2040,67 @@
     if (obj.version < 1 || !Array.isArray(obj.profiles)) return { ok: false, code: 'invalid' };
     const list = obj.profiles.map(normProfile).filter(Boolean).slice(0, PROFILES_MAX);
     return list.length ? { ok: true, profiles: list } : { ok: false, code: 'empty' };
+  }
+
+  // 重命名：{profiles} 或 {code:'name'|'not-found'|'exists'}
+  function profileRename(raw, id, name) {
+    const ps = normProfiles(raw);
+    const n = nvName(name);
+    if (!n) return { code: 'name' };
+    const p = ps.list.find(function (x) { return x.id === id; });
+    if (!p) return { code: 'not-found' };
+    if (ps.list.some(function (x) { return x.id !== id && x.name === n; })) return { code: 'exists' };
+    p.name = n;
+    return { profiles: ps };
+  }
+
+  // 删除：{profiles}（删的是当前配置档时 activeId 变为 null）或 {code:'not-found'}
+  function profileRemove(raw, id) {
+    const ps = normProfiles(raw);
+    const list = ps.list.filter(function (x) { return x.id !== id; });
+    if (list.length === ps.list.length) return { code: 'not-found' };
+    return { profiles: { v: 1, list: list, activeId: ps.activeId === id ? null : ps.activeId } };
+  }
+
+  const PROFILE_UNDO_MS = 10 * 60 * 1000;
+
+  /**
+   * 套用配置档前记下的撤销信息（storage.session 的 profileUndo，10 分钟内有效）：
+   * {at, id, name, prevActiveId, settings: {behavior, sites?}, nv: null}。配置档带网站规则时才记网站规则；
+   * NVIDIA 部分（{base, wrote}）由调用方在写入后补上。配置档不合法返回 null
+   */
+  function profileUndoRecord(settings, profile, prevActiveId, now) {
+    const p = normProfile(profile);
+    if (!p) return null;
+    const s = mergeSettings(settings);
+    const behavior = {};
+    for (const k of PROFILE_BEHAVIOR_KEYS) behavior[k] = clone(s[k]);
+    const out = {
+      at: typeof now === 'number' && isFinite(now) ? now : 0,
+      id: p.id,
+      name: p.name,
+      prevActiveId: typeof prevActiveId === 'string' && NV_ID_RE.test(prevActiveId) ? prevActiveId : null,
+      settings: { behavior: behavior },
+      nv: null
+    };
+    if (p.sites) out.settings.sites = clone(s.sites);
+    return out;
+  }
+
+  function profileUndoValid(undo, now) {
+    if (!isObj(undo) || typeof undo.at !== 'number' || !isObj(undo.settings) || !isObj(undo.settings.behavior)) return false;
+    const age = now - undo.at;
+    return age >= 0 && age <= PROFILE_UNDO_MS;
+  }
+
+  // 撤销配置档切换的设置部分：行为设置整体换回，记过网站规则时网站规则也换回；ui、nv、updateCheck 不碰。undo 不合法返回 null
+  function profileUndoApply(settings, undo) {
+    if (!isObj(undo) || !isObj(undo.settings) || !isObj(undo.settings.behavior)) return null;
+    const s = mergeSettings(settings);
+    const b = profileBehavior(undo.settings.behavior);
+    for (const k of PROFILE_BEHAVIOR_KEYS) s[k] = b[k];
+    if (isObj(undo.settings.sites)) s.sites = clone(undo.settings.sites);
+    return mergeSettings(s);
   }
 
   // ---------- 更新检查 ----------
@@ -2379,7 +2484,16 @@
     sitePresetFor: sitePresetFor,
     nvSiteDecide: nvSiteDecide,
     nvSiteRestorePatch: nvSiteRestorePatch,
+    nvWriteMemo: nvWriteMemo,
+    nvSiteRecord: nvSiteRecord,
     // 1.3：配置档
+    nvName: nvName,
+    PROFILE_UNDO_MS: PROFILE_UNDO_MS,
+    profileRename: profileRename,
+    profileRemove: profileRemove,
+    profileUndoRecord: profileUndoRecord,
+    profileUndoValid: profileUndoValid,
+    profileUndoApply: profileUndoApply,
     PROFILE_BEHAVIOR_KEYS: PROFILE_BEHAVIOR_KEYS,
     PROFILE_EXCLUDED_KEYS: PROFILE_EXCLUDED_KEYS,
     PROFILES_MAX: PROFILES_MAX,

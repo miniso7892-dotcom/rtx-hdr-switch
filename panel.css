@@ -182,6 +182,8 @@ body::after {
 
 #pf-list { padding: 6px 0 2px; }
 
+#pf-list:empty { display: none; }
+
 .text {
   flex: 1;
   min-width: 0;

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title data-i18n="options.title">RTX HDR 开关备份</title>
+  <title data-i18n="options.title">配置档与备份</title>
   <link rel="stylesheet" href="fonts/fonts.css">
   <link rel="stylesheet" href="options.css">
 </head>
@@ -22,22 +22,30 @@
   </header>
 
   <main class="wrap">
-    <p class="lead" data-i18n="options.back">设置都在扩展弹窗里，这里只做备份。</p>
-
-    <section class="card" id="export" aria-labelledby="export-title">
-      <h2 id="export-title" data-i18n="backup.export">导出备份</h2>
-      <p data-i18n="backup.exportDesc">把设置、预设、网站规则和记住的视频存成一个 JSON 文件。</p>
-      <button type="button" class="btn accent" id="btn-export" data-i18n="backup.export">导出备份</button>
-      <p class="msg" id="export-msg" role="status"></p>
+    <section class="card" id="profiles" aria-labelledby="pf-title">
+      <h2 id="pf-title" data-i18n="profile.title">配置档</h2>
+      <ul class="pf-list" id="pf-list" aria-labelledby="pf-title"></ul>
+      <div class="actions">
+        <button type="button" class="btn" id="pf-export-all" data-i18n="profile.exportAll">导出全部</button>
+        <label class="btn file">
+          <input type="file" id="pf-file" accept="application/json,.json" aria-label="从文件导入" data-i18n-attr="aria-label:profile.importFile">
+          <span data-i18n="profile.importFile">从文件导入</span>
+        </label>
+      </div>
+      <p class="msg" id="pf-msg" role="status"></p>
     </section>
 
-    <section class="card" id="import" aria-labelledby="import-title">
-      <h2 id="import-title" data-i18n="backup.import">导入备份</h2>
-      <p data-i18n="backup.importDesc">从导出的 JSON 文件恢复。会覆盖当前的设置和视频记忆。</p>
-      <label class="btn file">
-        <input type="file" id="file" accept="application/json,.json" aria-label="选择备份文件" data-i18n-attr="aria-label:backup.choose">
-        <span data-i18n="backup.choose">选择备份文件</span>
-      </label>
+    <section class="card" id="backup" aria-labelledby="backup-title">
+      <h2 id="backup-title" data-i18n="backup.title">备份</h2>
+      <p class="muted" id="backup-summary"></p>
+      <div class="actions">
+        <button type="button" class="btn accent" id="btn-export" data-i18n="backup.export">导出备份</button>
+        <label class="btn file">
+          <input type="file" id="file" accept="application/json,.json" aria-label="导入备份" data-i18n-attr="aria-label:backup.import">
+          <span data-i18n="backup.import">导入备份</span>
+        </label>
+      </div>
+      <p class="msg" id="export-msg" role="status"></p>
       <div class="preview" id="preview" hidden>
         <p class="strong" id="preview-summary"></p>
         <p class="muted" id="preview-from"></p>

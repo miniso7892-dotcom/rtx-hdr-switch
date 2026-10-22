@@ -24,6 +24,8 @@
   const NV_HOTKEY_ERROR_KEY = 'nvHotkeyError'; // 快捷键切换预设失败、页面上显示不了时 background 留下的提示
   const NV_HOTKEY_ERROR_MAX_AGE = 10 * 60 * 1000;
   const NV_SLIDERS = ['peak', 'middleGrey', 'contrast', 'saturation'];
+  const PROFILES_KEY = 'profiles'; // background 写：{v, list, activeId}
+  const PROFILE_UNDO_KEY = 'profileUndo'; // background 写（storage.session）：10 分钟内可以撤销的配置档切换
   // 文字由脚本随状态改写的元素：切换语言时不按 data-i18n 覆盖
   const DYNAMIC_TEXT = new Set(['video-message', 'nv-message', 'sdr-read', 'nv-delete']);
 
@@ -70,6 +72,15 @@
   let sdrLastWhite = null;
   let sdrAsked = null; // {white, at}：最近一次请 background 跟随的白电平
   let sdrMsgTimer = 0;
+
+  let profiles = L.normProfiles(null); // background 回复的配置档列表
+  let pfUndo = null; // {at, id, name}：还能撤销的那次切换
+  let pfUndoTimer = 0;
+  let pfMsgTimer = 0;
+  let pfSig = '';
+  let pfDeleteArmed = null; // {id, timer}
+  let pfOverwriteName = null; // 已提示过「将覆盖」的同名配置档，再保存一次才覆盖
+  let siteListSig = '';
 
   function noop() {}
 
@@ -387,6 +398,7 @@
     renderHdrOnlyStatus();
     renderTheme();
     renderNvPresets();
+    renderProfiles();
     renderFoot();
     renderShortcuts();
     if (current) renderState(current);
@@ -574,7 +586,9 @@
 
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'session' && changes[PROFILE_UNDO_KEY]) loadProfiles();
         if (area !== 'local') return;
+        if (changes[PROFILES_KEY]) loadProfiles();
         if (changes[NV_LAST_PRESET_KEY]) nvLastPresetId = changes[NV_LAST_PRESET_KEY].newValue || null;
         if (changes[SDR_LAST_KEY]) sdrLastWhite = changes[SDR_LAST_KEY].newValue == null ? null : changes[SDR_LAST_KEY].newValue;
         if (changes[HDR_ONLY_KEY]) {
@@ -630,6 +644,7 @@
       m.classList.toggle('warn', nv.mode === 'error');
     }
     renderNvPresets();
+    renderProfiles();
     renderGlobalOff();
     renderHdrOnlyStatus();
     if (!ready) return;
@@ -700,6 +715,7 @@
     setText('nv-schedule-hint', !presets.length
       ? t(missing ? 'nv.scheduleNeedHost' : 'nv.scheduleNeedPresets')
       : t('nv.scheduleHint') + (missing ? t('nv.scheduleHintMissing') : ''));
+    renderSitePresets();
   }
 
   function nvNewId() {
@@ -821,6 +837,345 @@
     // mergeSettings 会把指向它的夜间 / 其余时间选择变回「不切换」
     save((s) => { s.nv.presets = s.nv.presets.filter((x) => x.id !== p.id); });
     nvMessage(t('nv.deleted', { name: p.name }) + (uses.length ? t('nv.deletedCancelled', { uses: usesText }) : ''), !!uses.length);
+  }
+
+  // ---------- 按网站切换 NVIDIA 预设 ----------
+
+  // 本网站的下拉框和其他已绑定的网站（可以取消绑定）；绑定的增删走设置补丁，background 负责套用和恢复
+  function renderSitePresets() {
+    const presets = settings.nv.presets;
+    const map = settings.nv.sitePresets;
+    const sel = $('nv-site-preset');
+    fillSelect(sel, [['', t('nv.noSwitch')]].concat(presets.map((p) => [p.id, p.name])), (tabHost && map[tabHost]) || '');
+    sel.disabled = !tabHost || !presets.length;
+    setText('nv-site-host', tabHost);
+    // 本网站的绑定已经在下拉框里：列表只列其他网站
+    const hosts = Object.keys(map).filter((h) => h !== tabHost).sort();
+    const sig = JSON.stringify([hosts.map((h) => [h, map[h]]), presets.map((p) => [p.id, p.name]), lang]);
+    if (sig === siteListSig) return;
+    siteListSig = sig;
+    const ul = $('nv-site-list');
+    ul.textContent = '';
+    ul.hidden = !hosts.length;
+    for (const h of hosts) {
+      const p = presets.find((x) => x.id === map[h]);
+      const li = document.createElement('li');
+      const host = document.createElement('span');
+      host.className = 'sb-host';
+      host.textContent = h;
+      const name = document.createElement('span');
+      name.className = 'sb-preset';
+      name.textContent = p ? p.name : '';
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '×';
+      x.setAttribute('aria-label', t('site.nvPresetRemove', { host: h }));
+      x.addEventListener('click', () => {
+        save((s) => { delete s.nv.sitePresets[h]; });
+        const next = $('nv-site-list').querySelector('button') || $('nv-site-preset');
+        if (next) next.focus();
+      });
+      li.appendChild(host);
+      li.appendChild(name);
+      li.appendChild(x);
+      ul.appendChild(li);
+    }
+  }
+
+  // ---------- 配置档（只由 background 写：这里发 profile 消息，按回复里的列表显示） ----------
+
+  function profileMsg(op, extra) {
+    return call(() => chrome.runtime.sendMessage(Object.assign({ type: 'profile', op: op }, extra))).then(
+      (r) => (r && typeof r === 'object' ? r : { ok: false, code: 'internal' }), () => ({ ok: false, code: 'internal' }));
+  }
+
+  // 要读写 NVIDIA 参数的操作：先把弹窗自己端口上的修改发完，期间暂停自己的写入，回来后重新读一次
+  function profileNvMsg(op, extra) {
+    return nv.mode === 'ready' ? nv.exclusive(() => profileMsg(op, extra)) : profileMsg(op, extra);
+  }
+
+  function profileError(r) {
+    const key = 'profile.err.' + (r && typeof r.code === 'string' ? r.code : '');
+    return Object.prototype.hasOwnProperty.call(I.DICT.zh, key) ? t(key) : L.nvErrorText(r && r.error, lang);
+  }
+
+  function pfMessage(text, warn) {
+    const el = setText('pf-msg', text || '');
+    el.classList.toggle('warn', !!warn);
+    clearTimeout(pfMsgTimer);
+    if (text) pfMsgTimer = setTimeout(() => setText('pf-msg', ''), warn ? 6000 : 3000);
+  }
+
+  // 回复里带着最新的列表和 10 分钟内还能撤销的切换
+  function profilesAccept(r) {
+    if (!r || r.ok !== true) return;
+    profiles = L.normProfiles(r.profiles);
+    pfUndo = r.undo && typeof r.undo.at === 'number' ? r.undo : null;
+    renderProfiles();
+  }
+
+  async function loadProfiles() {
+    profilesAccept(await profileMsg('list'));
+  }
+
+  // 当前配置档和现在的设置、NVIDIA 参数（借用期间用借用前的开关）不一致时标「已修改」
+  function profileModified(p) {
+    const live = nv.mode === 'ready' && nv.state ? L.nvUnleased(nv.state, hdrOnlyStatus) : null;
+    const d = L.profileDiff(settings, live, p);
+    return !!d && d.length > 0;
+  }
+
+  function renderProfiles() {
+    const left = pfUndo ? pfUndo.at + L.PROFILE_UNDO_MS - Date.now() : 0;
+    $('pf-undo').hidden = !(left > 0);
+    clearTimeout(pfUndoTimer);
+    if (left > 0) pfUndoTimer = setTimeout(renderProfiles, left + 100);
+    const list = profiles.list;
+    const active = list.find((p) => p.id === profiles.activeId) || null;
+    const modified = !!active && profileModified(active);
+    const armed = pfDeleteArmed ? pfDeleteArmed.id : '';
+    const sig = JSON.stringify([list.map((p) => [p.id, p.name]), profiles.activeId, modified, armed, lang]);
+    if (sig === pfSig) return;
+    pfSig = sig;
+    // 重建列表时焦点留在同一个配置档的同一个按钮上
+    const ul = $('pf-list');
+    const f = document.activeElement && ul.contains(document.activeElement) ? document.activeElement : null;
+    const keep = f ? [f.dataset.id, f.dataset.act] : null;
+    ul.textContent = '';
+    for (const p of list) {
+      const li = document.createElement('li');
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pf-name';
+      b.dataset.id = p.id;
+      b.dataset.act = 'apply';
+      b.title = p.name;
+      b.setAttribute('aria-pressed', p === active ? 'true' : 'false');
+      const n = document.createElement('span');
+      n.className = 'pf-n';
+      n.id = 'pf-n-' + p.id;
+      n.textContent = p.name;
+      b.appendChild(n);
+      if (p === active && modified) {
+        const m = document.createElement('span');
+        m.className = 'pf-mod';
+        m.textContent = t('profile.modified');
+        b.appendChild(m);
+      }
+      b.addEventListener('click', () => applyProfile(p));
+      li.appendChild(b);
+      for (const [act, text, fn] of [['copy', t('profile.copy'), copyProfile], ['delete', armed === p.id ? t('nv.confirmDelete') : t('profile.delete'), deleteProfile]]) {
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'link';
+        x.dataset.id = p.id;
+        x.dataset.act = act;
+        x.textContent = text;
+        x.setAttribute('aria-describedby', n.id);
+        x.addEventListener('click', () => fn(p));
+        li.appendChild(x);
+      }
+      ul.appendChild(li);
+    }
+    if (keep) {
+      const again = Array.from(ul.querySelectorAll('button')).find((x) => x.dataset.id === keep[0] && x.dataset.act === keep[1]);
+      if (again) again.focus();
+    }
+  }
+
+  function profileAppliedText(r) {
+    if (r.nvError) return t('bg.profileNvFailed', { name: r.name, err: L.nvErrorText(r.nvError, lang) });
+    if (r.hdrSkipped) return t('bg.profilePartial', { name: r.name });
+    return t('profile.applied', { name: r.name });
+  }
+
+  async function applyProfile(p) {
+    pfDisarmDelete();
+    flushSave();
+    const r = await (p.nv ? profileNvMsg('apply', { id: p.id }) : profileMsg('apply', { id: p.id }));
+    if (!r || r.ok !== true) {
+      pfMessage(profileError(r), true);
+      loadProfiles();
+      return;
+    }
+    profilesAccept(r);
+    pfMessage(profileAppliedText(r), !!(r.nvError || r.hdrSkipped));
+  }
+
+  async function undoProfile() {
+    pfDisarmDelete();
+    const r = await profileNvMsg('undo');
+    if (!r || r.ok !== true) {
+      pfMessage(profileError(r), true);
+      loadProfiles();
+      return;
+    }
+    profilesAccept(r);
+    if (r.nvError) pfMessage(L.nvErrorText(r.nvError, lang), true);
+    else pfMessage(t('profile.undone'));
+    ($('pf-list').querySelector('button') || $('pf-save')).focus();
+  }
+
+  // 保存表单和粘贴表单同一时间只开一个
+  function showPfForm(which) {
+    $('pf-form').hidden = which !== 'save';
+    $('pf-paste-form').hidden = which !== 'paste';
+    $('pf-save').setAttribute('aria-expanded', String(which === 'save'));
+    $('pf-paste').setAttribute('aria-expanded', String(which === 'paste'));
+    pfOverwriteName = null;
+    if (which === 'save') {
+      const names = new Set(profiles.list.map((p) => p.name));
+      let n = profiles.list.length + 1;
+      while (names.has(t('profile.defaultName', { n: n }))) n++;
+      const input = $('pf-name');
+      input.value = t('profile.defaultName', { n: n });
+      const nvOk = nv.mode === 'ready' && !!nv.state;
+      $('pf-nv').disabled = !nvOk;
+      $('pf-nv').checked = nvOk;
+      $('pf-sites').checked = false;
+      input.focus();
+      input.select();
+    } else if (which === 'paste') {
+      $('pf-text').value = '';
+      $('pf-text').focus();
+    }
+  }
+
+  // 同名的先提示，再保存一次才覆盖
+  async function saveProfile() {
+    const name = L.nvName($('pf-name').value);
+    if (!name) {
+      pfMessage(t('profile.err.name'), true);
+      $('pf-name').focus();
+      return;
+    }
+    flushSave();
+    const req = { name: name, sites: $('pf-sites').checked, nv: $('pf-nv').checked && !$('pf-nv').disabled, overwrite: pfOverwriteName === name };
+    const r = await (req.nv ? profileNvMsg('save', req) : profileMsg('save', req));
+    if (!r || r.ok !== true) {
+      if (r && r.code === 'exists') {
+        pfOverwriteName = name;
+        pfMessage(t('profile.overwrite', { name: name }), true);
+        $('pf-name').focus();
+        return;
+      }
+      pfMessage(profileError(r), true);
+      return;
+    }
+    profilesAccept(r);
+    showPfForm(null);
+    $('pf-save').focus();
+    pfMessage(t(r.overwrote ? 'profile.updated' : 'profile.saved', { name: name }));
+  }
+
+  // 复制为文本：和配置档文件同一个格式（只有一个配置档）
+  async function copyProfile(p) {
+    pfDisarmDelete();
+    let v = '';
+    try { v = chrome.runtime.getManifest().version; } catch (e) { v = ''; }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(L.makeProfilesFile([p], v)));
+      pfMessage(t('profile.copied', { name: p.name }));
+    } catch (e) {
+      pfMessage((e && e.message) || 'error', true);
+    }
+  }
+
+  function importResultText(r) {
+    const n = r.added.length;
+    const renamed = r.added.filter((a) => a.renamed).length;
+    let text = renamed ? t('profile.importedRenamed', { n: n, renamed: renamed }) : t('profile.imported', { n: n });
+    if (r.dropped) text += (lang === 'en' ? '. ' : '；') + t('profile.dropped', { n: r.dropped });
+    return text;
+  }
+
+  async function importProfiles() {
+    let obj = null;
+    try { obj = JSON.parse($('pf-text').value); } catch (e) { obj = null; }
+    const v = L.validateProfilesFile(obj);
+    if (!v.ok) {
+      pfMessage(t('profile.err.' + v.code), true);
+      $('pf-text').focus();
+      return;
+    }
+    const r = await profileMsg('import', { profiles: v.profiles });
+    if (!r || r.ok !== true) {
+      pfMessage(profileError(r), true);
+      return;
+    }
+    profilesAccept(r);
+    showPfForm(null);
+    $('pf-paste').focus();
+    pfMessage(importResultText(r), !!r.dropped);
+  }
+
+  function pfDisarmDelete() {
+    if (!pfDeleteArmed) return;
+    clearTimeout(pfDeleteArmed.timer);
+    pfDeleteArmed = null;
+    renderProfiles();
+  }
+
+  // 删除不能撤销：第一次只把按钮变成「确认删除？」，4 秒内再按一次才删
+  async function deleteProfile(p) {
+    if (!pfDeleteArmed || pfDeleteArmed.id !== p.id) {
+      pfDisarmDelete();
+      const ask = t('profile.deleteAsk', { name: p.name });
+      pfDeleteArmed = {
+        id: p.id,
+        timer: setTimeout(() => {
+          if ($('pf-msg').textContent === ask) pfMessage('');
+          pfDisarmDelete();
+        }, NV_CONFIRM_MS)
+      };
+      renderProfiles();
+      pfMessage(ask, true);
+      return;
+    }
+    clearTimeout(pfDeleteArmed.timer);
+    pfDeleteArmed = null;
+    const r = await profileMsg('delete', { id: p.id });
+    if (!r || r.ok !== true) {
+      pfMessage(profileError(r), true);
+      loadProfiles();
+      return;
+    }
+    profilesAccept(r);
+    $('pf-save').focus();
+    pfMessage(t('profile.deleted', { name: p.name }));
+  }
+
+  function bindProfiles() {
+    $('pf-undo').addEventListener('click', undoProfile);
+    $('pf-save').addEventListener('click', () => showPfForm($('pf-form').hidden ? 'save' : null));
+    $('pf-paste').addEventListener('click', () => showPfForm($('pf-paste-form').hidden ? 'paste' : null));
+    $('pf-save-ok').addEventListener('click', saveProfile);
+    $('pf-import').addEventListener('click', importProfiles);
+    $('pf-save-cancel').addEventListener('click', () => {
+      showPfForm(null);
+      $('pf-save').focus();
+    });
+    $('pf-paste-cancel').addEventListener('click', () => {
+      showPfForm(null);
+      $('pf-paste').focus();
+    });
+    $('pf-name').addEventListener('input', () => { pfOverwriteName = null; });
+    $('pf-name').addEventListener('keydown', (e) => {
+      if (e.isComposing) return; // 输入法选词时的回车不算
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        saveProfile();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        showPfForm(null);
+        $('pf-save').focus();
+      }
+    });
+    onChange('nv-site-preset', (el) => save((s) => {
+      if (!tabHost) return;
+      if (el.value) s.nv.sitePresets[tabHost] = el.value;
+      else delete s.nv.sitePresets[tabHost];
+    }, NV_DEBOUNCE_MS));
   }
 
   // 拖回起点时 Chrome 不发 change，松手时照样提交一次
@@ -1128,6 +1483,8 @@
     renderSettings();
     bind();
     nvBind();
+    bindProfiles();
+    loadProfiles();
     // 快捷键切换预设失败时当前页面显示不了提示（chrome:// 页面等）：在这里补一次，只显示一次
     if (hotkeyError) {
       call(() => chrome.storage.local.remove(NV_HOTKEY_ERROR_KEY)).catch(noop);

@@ -1687,6 +1687,11 @@ test('nvSiteRestorePatch：只恢复实时值仍等于写入值的字段', () =>
   assert.equal(L.nvSiteRestorePatch(rec, NV_STATE), null, '都已经被改回去了');
   assert.equal(L.nvSiteRestorePatch(rec, nvState({ hdr: { peak: 800, middleGrey: 50, error: 1 } })), null, 'HDR 出错时不写 hdr');
   assert.equal(L.nvSiteRestorePatch(null, NV_STATE), null);
+  // 借用期间：开关和借用前的值比较（离开时「只关 HDR」正借着开关，也要把进入前的「关」写回去）
+  const on = { base: { hdr: { enabled: false, peak: 1000 } }, wrote: { hdr: { enabled: true, peak: 800 } } };
+  const leased = nvState({ hdr: { enabled: false, peak: 800 } });
+  assert.deepEqual(L.nvSiteRestorePatch(on, leased), { hdr: { peak: 1000 }, commit: true }, '不看借用会漏掉开关');
+  assert.deepEqual(L.nvSiteRestorePatch(on, leased, { held: true, prevEnabled: true }), { hdr: { enabled: false, peak: 1000 }, commit: true });
 });
 
 // ---------- 配置档 ----------
@@ -2705,6 +2710,277 @@ test('弹窗：规则页签有「面板打开方式」三段，控制栏按钮�
   assert.ok(html.indexOf('id="player-button"') < html.indexOf('name="player-panel"'));
   const js = srcOf('popup.js');
   assert.ok(/r\.disabled = !s\.playerButton;/.test(js) && /s\.playerPanel = r\.value/.test(js));
+});
+
+// ---------- 1.3 P5：配置档、按网站切换 NVIDIA 预设 ----------
+
+// background.js 里顶层（不缩进）的函数整段
+function bgFn(src, name) {
+  const m = new RegExp('\\n(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\}').exec(src);
+  assert.ok(m, '找到 ' + name);
+  return m[0];
+}
+
+test('nvWriteMemo：base 保留第一次写之前的值，只补新字段；wrote 叠加这次补丁；不修改输入', () => {
+  const before = nvState({ hdr: { middleGrey: 65, peak: 1000 } });
+  const patch = { hdr: { middleGrey: 40, peak: 800 }, commit: true };
+  const m = L.nvWriteMemo(null, before, patch);
+  assert.deepEqual(m, { base: { hdr: { peak: 1000, middleGrey: 65 } }, wrote: { hdr: { peak: 800, middleGrey: 40 } } });
+  // 第二次（A → B）：已有的 base 不动，B 多写的超分补上 base
+  const sa = JSON.stringify(m);
+  const m2 = L.nvWriteMemo(m, nvState({ hdr: { middleGrey: 40, peak: 800 } }), { hdr: { middleGrey: 45 }, vsr: { mode: 3 }, commit: true });
+  assert.deepEqual(m2, { base: { hdr: { peak: 1000, middleGrey: 65 }, vsr: { mode: 5 } }, wrote: { hdr: { peak: 800, middleGrey: 45 }, vsr: { mode: 3 } } });
+  assert.equal(JSON.stringify(m), sa, '不修改 prev');
+  // 借用期间不知道借用前的开关：base 里没有 enabled，恢复时跳过它
+  const leased = L.nvUnleased(nvState({ hdr: { enabled: false } }), { held: true });
+  const m3 = L.nvWriteMemo(null, leased, { hdr: { enabled: true, middleGrey: 50 } });
+  assert.equal(m3.base.hdr.enabled, undefined);
+  assert.equal(m3.wrote.hdr.enabled, true);
+  assert.equal(L.nvWriteMemo(null, null, patch), null);
+  assert.equal(L.nvWriteMemo(null, before, 'x'), null);
+  // 和恢复配合：只恢复实时值仍等于写入值的
+  assert.deepEqual(L.nvSiteRestorePatch(m2, nvState({ hdr: { middleGrey: 45, peak: 900 }, vsr: { mode: 3 } })), { hdr: { middleGrey: 65 }, vsr: { mode: 5 }, commit: true });
+});
+
+test('nvSiteRecord：A → B 保留 A 的 base，记下时段、manual 为 false', () => {
+  const recA = L.nvSiteRecord(null, nvState(), { hdr: { middleGrey: 40 }, commit: true }, { host: 'a.com', presetId: 'p1', phase: 'night', now: 5 });
+  assert.deepEqual(recA, { host: 'a.com', presetId: 'p1', phase: 'night', at: 5, seenAt: 5, base: { hdr: { middleGrey: 65 } }, wrote: { hdr: { middleGrey: 40 } }, manual: false });
+  const recB = L.nvSiteRecord(Object.assign({}, recA, { manual: true }), nvState({ hdr: { middleGrey: 40 } }), { hdr: { middleGrey: 45, peak: 800 } }, { host: 'b.com', presetId: 'p2', phase: 'x', now: 9 });
+  assert.equal(recB.host, 'b.com');
+  assert.equal(recB.phase, null);
+  assert.equal(recB.manual, false);
+  assert.deepEqual(recB.base, { hdr: { peak: 1000, middleGrey: 65 } });
+  for (const bad of [{ host: '', presetId: 'p1' }, { host: 'a.com', presetId: 'bad id' }, null]) {
+    assert.equal(L.nvSiteRecord(null, nvState(), { hdr: { middleGrey: 40 } }, bad), null, JSON.stringify(bad));
+  }
+});
+
+const pfList = () => ({ v: 1, list: [L.profileFromCurrent(S({}), null, { id: 'a', name: 'A' }), L.profileFromCurrent(S({ osd: false }), null, { id: 'b', name: 'B' })], activeId: 'b' });
+
+test('profileRename / profileRemove', () => {
+  const ps = pfList();
+  const s0 = JSON.stringify(ps);
+  const r = L.profileRename(ps, 'a', '  新名字 ');
+  assert.equal(r.profiles.list[0].name, '新名字');
+  assert.equal(r.profiles.activeId, 'b');
+  assert.equal(JSON.stringify(ps), s0, '不修改输入');
+  assert.deepEqual(L.profileRename(ps, 'a', 'B'), { code: 'exists' });
+  assert.deepEqual(L.profileRename(ps, 'a', 'A'), { profiles: L.normProfiles(ps) }, '改成自己原来的名字');
+  assert.deepEqual(L.profileRename(ps, 'zz', 'C'), { code: 'not-found' });
+  assert.deepEqual(L.profileRename(ps, 'a', '  '), { code: 'name' });
+  assert.equal(Array.from(L.profileRename(ps, 'a', 'x'.repeat(40)).profiles.list[0].name).length, L.NV_NAME_MAX);
+  const d = L.profileRemove(ps, 'b');
+  assert.deepEqual(d.profiles.list.map((p) => p.id), ['a']);
+  assert.equal(d.profiles.activeId, null, '删掉当前的');
+  assert.equal(L.profileRemove(ps, 'a').profiles.activeId, 'b');
+  assert.deepEqual(L.profileRemove(ps, 'zz'), { code: 'not-found' });
+  assert.equal(JSON.stringify(ps), s0);
+});
+
+test('profileUndoRecord / profileUndoValid / profileUndoApply：10 分钟内整体换回行为设置和网站规则', () => {
+  const cur = S({ osd: false, defaultState: 'fullscreen', night: { enabled: true, start: '21:00', end: '06:00' }, sites: { 'a.com': 'off' }, ui: { lang: 'en' } });
+  const withSites = L.profileFromCurrent(S({ sites: { 'b.com': 'on' } }), null, { id: 'p', name: 'P', sites: true });
+  const u = L.profileUndoRecord(cur, withSites, 'q', 1000);
+  assert.equal(u.at, 1000);
+  assert.equal(u.id, 'p');
+  assert.equal(u.name, 'P');
+  assert.equal(u.prevActiveId, 'q');
+  assert.equal(u.nv, null);
+  assert.deepEqual(Object.keys(u.settings.behavior).sort(), L.PROFILE_BEHAVIOR_KEYS.slice().sort());
+  assert.deepEqual(u.settings.sites, { 'a.com': 'off' });
+  assert.equal(L.profileUndoRecord(cur, L.profileFromCurrent(S({}), null, { id: 'p', name: 'P' }), null, 1).settings.sites, undefined, '配置档不带网站规则时不记');
+  assert.equal(L.profileUndoRecord(cur, null, null, 1), null);
+  assert.equal(L.profileUndoRecord(cur, withSites, 'bad id', 1).prevActiveId, null);
+  // 有效期
+  assert.equal(L.profileUndoValid(u, 1000 + L.PROFILE_UNDO_MS), true);
+  assert.equal(L.profileUndoValid(u, 1000 + L.PROFILE_UNDO_MS + 1), false);
+  assert.equal(L.profileUndoValid(u, 999), false, '时间倒退');
+  assert.equal(L.profileUndoValid(null, 1000), false);
+  assert.equal(L.PROFILE_UNDO_MS, 10 * 60 * 1000);
+  // 套用后撤销：行为设置和网站规则回到原样，ui / nv 用撤销时的
+  const applied = L.profileApply(cur, withSites);
+  assert.equal(applied.osd, true);
+  applied.ui.lang = 'zh';
+  const back = L.profileUndoApply(applied, u);
+  for (const k of L.PROFILE_BEHAVIOR_KEYS) assert.deepEqual(back[k], cur[k], k);
+  assert.deepEqual(back.sites, cur.sites);
+  assert.equal(back.ui.lang, 'zh', 'ui 不碰');
+  assert.equal(L.profileUndoApply(cur, { settings: {} }), null);
+});
+
+test('background：配置档服务（锁顺序、套用步骤、面板白名单、只由 background 写 profiles）', () => {
+  const bg = srcOf('background.js');
+  // 消息：扩展页面全部；面板只能 list / apply / next / undo / save，并且限速
+  assert.ok(/const PANEL_PROFILE_OPS = new Set\(\['list', 'apply', 'next', 'undo', 'save'\]\);/.test(bg));
+  assert.ok(/msg\.type === 'profile' && page\)/.test(bg));
+  assert.ok(/page === 'panel' && \(!PANEL_PROFILE_OPS\.has\(msg\.op\) \|\| \(msg\.op !== 'list' && !patchRateOk\(sender\.tab\.id\)\)\)/.test(bg));
+  const h = bgFn(bg, 'profileHandle');
+  for (const op of ['list', 'save', 'apply', 'next', 'undo', 'rename', 'delete', 'import']) assert.ok(h.includes("case '" + op + "'"), op);
+  // 锁：配置档在外，设置和 NVIDIA 在内；备份导入同样先拿配置档的锁
+  assert.ok(/return profilesTxn\(\(\) => backupImportLocked\(res\)\);/.test(bgFn(bg, 'backupImport')));
+  for (const fn of ['settingsTxn', 'nvWriteLocked', 'hoDropLocked', 'nvTxn']) assert.ok(!/profilesTxn\(/.test(bgFn(bg, fn)), fn + ' 不等配置档的锁');
+  // 套用：撤销信息 → 预写时段 → 设置 → NVIDIA（profile 来源，借用 yield）→ 当前配置档
+  const ap = bgFn(bg, 'profileApplyLocked');
+  const order = ['L.profileUndoRecord(', 'profilePrePhase(', 'settingsTxn((c) => L.profileApply(c, p))', "source: 'profile'", 'profilesWrite('];
+  let last = -1;
+  for (const s of order) {
+    const i = ap.indexOf(s);
+    assert.ok(i > last, '顺序：' + s);
+    last = i;
+  }
+  assert.ok(/lease: 'yield'/.test(ap) && /L\.nvWriteMemo\(null, L\.nvUnleased\(st, lease\), patch\)/.test(ap));
+  // 保存：NVIDIA 部分在锁里读，借用期间用借用前的开关；同名没说覆盖时回 exists
+  const sv = bgFn(bg, 'profileSave');
+  assert.ok(/nvTxn\(async \(\) => \(\{ res: await hostCall\(\{ cmd: 'get' \}\), lease: hoLeaseInfo\(\) \}\)\)/.test(sv));
+  assert.ok(/same && msg\.overwrite !== true\) return \{ ok: false, code: 'exists'/.test(sv));
+  // 撤销：10 分钟、NVIDIA 只恢复没被改过的、当前配置档换回
+  const un = bgFn(bg, 'profileUndo');
+  assert.ok(/code: 'expired'/.test(un) && /L\.nvSiteRestorePatch\(u\.nv, st, lease\)/.test(un) && /u\.prevActiveId/.test(un));
+  assert.ok(/L\.profileUndoValid\(u, Date\.now\(\)\)/.test(bgFn(bg, 'profileUndoGet')));
+  // 导入再规范化、合并
+  assert.ok(/L\.profilesMerge\(cur\.list, list\.slice\(0, 200\), Date\.now\(\)\)/.test(bgFn(bg, 'profileImport')));
+  // 快捷键
+  assert.ok(/if \(command === 'next-profile'\) return profileNextHotkey\(\);/.test(bg));
+  assert.ok(/L\.nvNextPresetId\(cur\.list, cur\.activeId\)/.test(bgFn(bg, 'profileNext')));
+  // 页面不写 profiles（只读、只发 profile 消息）
+  for (const f of ['popup.js', 'options.js', 'panel.js']) {
+    const src = srcOf(f);
+    assert.ok(/type: 'profile', op: op/.test(src), f + ' 发 profile 消息');
+    for (const w of storageWrites(src)) assert.ok(!/profiles|PROFILES_KEY/.test(w.args), f + ' 写了 profiles');
+  }
+});
+
+test('background：按网站切换预设的引擎（触发、去抖、时段、手动、闹钟）', () => {
+  const bg = srcOf('background.js');
+  assert.ok(/const NV_SITE_DEBOUNCE_MS = 2000;/.test(bg) && /const NV_SITE_ALARM = 'nv-site';/.test(bg));
+  // 触发：报告、标签页切换、窗口焦点（不含 WINDOW_ID_NONE）、换网址、关标签页、绑定或预设变了、闹钟
+  assert.ok(/siteSchedule\(false\);/.test(bgFn(bg, 'handleReport')));
+  assert.ok(/chrome\.tabs\.onActivated\.addListener\(\(\) => \{[\s\S]*?siteSchedule\(true\);/.test(bg));
+  assert.ok(/if \(windowId === chrome\.windows\.WINDOW_ID_NONE\) return;[\s\S]*?siteSchedule\(true\);/.test(bg));
+  // 只看活动标签页的换网址；关标签页不重新计时（后台标签页不能把判断一直往后推）
+  assert.ok(/if \(changeInfo && changeInfo\.url && tab && tab\.active\) siteSchedule\(true\);/.test(bg));
+  assert.ok(/chrome\.tabs\.onRemoved\.addListener\(\(tabId\) => \{[\s\S]*?siteSchedule\(false\);\n\}\);/.test(bg));
+  // 浏览器启动、扩展更新后还有记录：重新判断
+  assert.ok(/chrome\.runtime\.onStartup\.addListener\(\(\) => \{[\s\S]*?siteSchedule\(true\);\n\}\);/.test(bg));
+  assert.ok(/chrome\.runtime\.onInstalled\.addListener\(\(details\) => \{[\s\S]*?\.then\(\(\) => siteSchedule\(true\)\);/.test(bg));
+  assert.ok(/prev\.nv\.sitePresets[\s\S]*?prev\.nv\.presets[\s\S]*?siteSchedule\(true\)/.test(bg));
+  assert.ok(/alarm\.name === NV_SITE_ALARM\) siteEvaluate\(\)/.test(bg));
+  // 报告不会把排着的判断一直往后推
+  assert.ok(/if \(!siteWanted\(\) \|\| \(siteTimer && !reset\)\) return;/.test(bgFn(bg, 'siteSchedule')));
+  // 判断交给 lib；套用经 nvWrite（site 来源、借用 yield、跟随 SDR 时不写中间灰），写成功后才存记录
+  const ev = bgFn(bg, 'siteEvaluateOnce');
+  assert.ok(/L\.nvSiteDecide\(/.test(ev));
+  const ap = bgFn(bg, 'siteApply');
+  assert.ok(/source: 'site'/.test(ap) && /lease: 'yield'/.test(ap) && /L\.nvAutoGuard\(L\.nvPresetPatch\(preset, st\), s, 'site'\)/.test(ap));
+  assert.ok(ap.indexOf('res.ok !== true') < ap.indexOf('siteRecordSet(record)'), '写成功后才存记录');
+  assert.ok(/NV_SITE_RETRY_MS/.test(ap), '失败后不每次报告都重试');
+  assert.ok(/if \(sig === siteFailShown\) return;/.test(ap) && ap.indexOf('siteFailShown = sig;') < ap.indexOf("'bg.siteFailed'"), '同一种失败只提示一次');
+  // 带网站名的提示只发给还停在这个网站上的标签页；恢复提示不带网站名
+  assert.ok(/if \(host\) \{[\s\S]*?siteTarget\(\)[\s\S]*?t\.topHost !== host/.test(bgFn(bg, 'siteOsd')));
+  assert.ok(/siteOsd\(s, d\.host, L\.t\(lang, 'bg\.site', \{ host: d\.host/.test(ap));
+  for (const lang of ['zh', 'en']) assert.ok(!/\{host\}/.test(L.t(lang, 'bg.siteRestore')), lang);
+  // 离开：时段变了且新时段选了预设时套用时段预设并记下时段，否则只恢复没被改过的；最后删记录
+  const lv = bgFn(bg, 'siteLeave');
+  assert.ok(/nvApplyPreset\(preset, false, 'schedule'\)/.test(lv) && /\[NV_PHASE_KEY\]: r/.test(lv) && /L\.nvSiteRestorePatch\(rec, st, lease\)/.test(lv) && /siteRecordSet\(null\)/.test(lv));
+  // 这个时段已经套用过（配置档预写了时段）或期间手动改过：不套用时段预设，只恢复，并记下新时段
+  assert.ok(/nvPhaseRecord\(r && r\[NV_PHASE_KEY\]\)/.test(lv) && /moved && !done && rec\.manual !== true/.test(lv));
+  assert.ok(/if \(moved && !done\) await call\(\(\) => chrome\.storage\.local\.set\(\{ \[NV_PHASE_KEY\]: \{ phase: phase, id: id \} \}\)\)/.test(lv));
+  assert.ok(/source: 'site', label: 'restore'/.test(lv), '恢复的 label 是 restore');
+  // 宽限期：一次性闹钟
+  assert.ok(/chrome\.alarms\.create\(NV_SITE_ALARM, \{ when: at \+ 1000 \}\)/.test(bgFn(bg, 'siteWait')));
+  // 生效期间时段检查直接返回，不记时段
+  const so = bgFn(bg, 'nvScheduleOnce');
+  assert.ok(so.indexOf('if (await siteRecordGet()) return;') >= 0 && so.indexOf('if (await siteRecordGet()) return;') < so.indexOf('NV_PHASE_KEY]: rec'));
+  // 用户来源的写入（含弹窗和面板补记的）标 manual
+  assert.ok(/if \(user && diff\) siteMarkManual\(\);/.test(bgFn(bg, 'nvWriteLocked')));
+  assert.ok(/siteMarkManual\(\)/.test(bgFn(bg, 'nvLogFromPage')));
+  // 记录在 storage.local（浏览器退出后还能恢复）；备份导入清掉
+  assert.ok(/const BACKUP_CLEAR_SESSION = \[PROFILE_UNDO_KEY\];/.test(bg));
+  assert.ok(/chrome\.storage\.local\.get\(NV_SITE_KEY\)/.test(bgFn(bg, 'siteRecordGet')) && /chrome\.storage\.local\.set\(\{ \[NV_SITE_KEY\]: rec \}\)/.test(bgFn(bg, 'siteRecordSet')));
+  assert.ok(/old\.push\(NV_PHASE_KEY, SDR_LAST_KEY, NV_LAST_PRESET_KEY, NV_SITE_KEY\);/.test(bgFn(bg, 'backupImportLocked')));
+  // 屏幕提示建不了 closed shadow root 时不显示，文字不落进页面的 DOM
+  const cs = srcOf('content.js');
+  assert.ok(!/osdText = osdEl/.test(cs) && /osdEl = null;\s*osdText = null;\s*osdMark = null;\s*osdBtn = null;\s*return;/.test(cs));
+  // 面板收起时不因存储变化重读配置档（background 不回收起的面板）
+  const pj = srcOf('panel.js');
+  assert.ok(/changes\[PROFILES_KEY\] && ready && open && profilesOn\) loadProfiles\(\)/.test(pj) && /changes\[PROFILE_UNDO_KEY\] && ready && open && profilesOn\) loadProfiles\(\)/.test(pj));
+});
+
+test('弹窗：配置档卡片和「本网站套用」', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
+  const js = srcOf('popup.js');
+  // 配置档卡片在规则页签最上面；保存表单有两个复选框；粘贴导入用文本框
+  const rules = html.slice(html.indexOf('id="panel-rules"'));
+  assert.ok(rules.indexOf('id="pf-title"') < rules.indexOf('id="theme-title"'));
+  for (const id of ['pf-undo', 'pf-list', 'pf-save', 'pf-paste', 'pf-name', 'pf-sites', 'pf-nv', 'pf-save-ok', 'pf-text', 'pf-import', 'pf-msg']) assert.ok(html.includes('id="' + id + '"'), id);
+  assert.ok(/<textarea [^>]*aria-label="[^"]+"[^>]*data-i18n-attr="aria-label:profile\.text"/.test(html));
+  // 「本网站套用」紧跟在夜间和其余时间的预设后面
+  assert.ok(html.indexOf('id="nv-day-preset"') < html.indexOf('id="nv-site-preset"') && html.indexOf('id="nv-site-preset"') < html.indexOf('id="eye-autooff"'));
+  // 绑定的增删走设置补丁（防抖），列表不重复本网站，取消绑定的按钮有名称
+  assert.ok(/s\.nv\.sitePresets\[tabHost\] = el\.value/.test(js) && /delete s\.nv\.sitePresets\[tabHost\]/.test(js));
+  const rs = fnBody(js, 'renderSitePresets');
+  assert.ok(/filter\(\(h\) => h !== tabHost\)/.test(rs) && /t\('site\.nvPresetRemove', \{ host: h \}\)/.test(rs));
+  // 「已修改」按 profileDiff，借用期间用借用前的开关
+  assert.ok(/L\.profileDiff\(settings, live, p\)/.test(fnBody(js, 'profileModified')) && /L\.nvUnleased\(nv\.state, hdrOnlyStatus\)/.test(fnBody(js, 'profileModified')));
+  // 撤销切换只在 10 分钟内显示；套用和撤销先让自己的 NVIDIA 写入停下
+  assert.ok(/pfUndo\.at \+ L\.PROFILE_UNDO_MS - Date\.now\(\)/.test(fnBody(js, 'renderProfiles')));
+  assert.ok(/nv\.exclusive\(\(\) => profileMsg\(op, extra\)\)/.test(fnBody(js, 'profileNvMsg')));
+  // 删除两步、同名保存两步
+  assert.ok(/pfDeleteArmed/.test(fnBody(js, 'deleteProfile')) && /overwrite: pfOverwriteName === name/.test(fnBody(js, 'saveProfile')));
+  // 复制为文本用配置档文件的格式；粘贴先检查
+  assert.ok(/L\.makeProfilesFile\(\[p\], v\)/.test(fnBody(js, 'copyProfile')) && /L\.validateProfilesFile\(obj\)/.test(fnBody(js, 'importProfiles')));
+  assert.ok(!/innerHTML/.test(js));
+});
+
+test('选项页：配置档与备份（只发消息，不写 storage）', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'options.html'), 'utf8');
+  const js = srcOf('options.js');
+  assert.ok(/<title data-i18n="options\.title">/.test(html));
+  assert.ok(html.indexOf('id="profiles"') < html.indexOf('id="backup"'), '配置档在前，备份在后');
+  assert.ok(html.includes('id="btn-export"') && html.includes('id="file"'), '弹窗的 #export / #import 仍能定位');
+  // 没有导语和说明段落：卡片里只有标题、列表、按钮、摘要和结果提示
+  assert.ok(!/class="lead"/.test(html));
+  for (const m of html.matchAll(/<p [^>]*>/g)) assert.ok(/id="(pf-msg|export-msg|import-msg|backup-summary|preview-summary|preview-from)"/.test(m[0]), m[0]);
+  for (const op of ['list', 'apply', 'rename', 'delete', 'import']) assert.ok(new RegExp("profileMsg\\('" + op + "'").test(js), op);
+  assert.ok(/L\.validateProfilesFile\(obj\)/.test(js) && /L\.makeProfilesFile\(list, version\(\), now\.getTime\(\)\)/.test(js));
+  assert.ok(/t\('backup\.summaryProfiles', backupCounts\(/.test(js), '备份摘要带配置档数量');
+  assert.equal(storageWrites(js).length, 0);
+  assert.ok(!/innerHTML/.test(js));
+});
+
+test('面板：配置档页签（撤销切换、两步覆盖、带 NVIDIA 参数时先停自己的写入）', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'panel.html'), 'utf8');
+  const js = srcOf('panel.js');
+  assert.ok(html.includes('id="pf-undo"'));
+  assert.ok(!/profile\.none/.test(js), '空列表不写说明');
+  assert.ok(/pfUndo\.at \+ L\.PROFILE_UNDO_MS - Date\.now\(\)/.test(fnBody(js, 'renderProfiles')));
+  assert.ok(/nv\.exclusive\(\(\) => profileMsg\(op, extra\)\)/.test(fnBody(js, 'profileNvMsg')));
+  const sv = fnBody(js, 'saveProfile');
+  assert.ok(/sites: false, nv: withNv, overwrite: pfOverwrite === L\.nvName\(name\)/.test(sv) && /r\.code === 'exists'/.test(sv));
+  assert.ok(/\$\('pf-undo'\)\.addEventListener\('click', \(e\) => \{ if \(act\(e\)\) undoProfile\(\); \}\);/.test(js));
+});
+
+test('i18n P5：三个概念用标题和位置区分，删掉的说明键不再出现，新键齐全', () => {
+  const I = require('../i18n.js');
+  const all = ['popup.js', 'popup.html', 'options.js', 'options.html', 'panel.js', 'panel.html', 'background.js'].map((f) => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n');
+  for (const k of ['profile.concept', 'nv.presetConcept', 'backup.concept', 'profile.none', 'profile.active', 'profile.pasteHint', 'bg.profileUndo',
+    'site.nvPresetDesc', 'site.nvPresetNone', 'site.nvPresetHost', 'site.nvPresetList', 'site.nvPresetEmpty', 'site.nvPresetNeedPresets',
+    'options.back', 'backup.exportDesc', 'backup.importDesc', 'backup.choose']) {
+    assert.ok(!(k in I.DICT.zh) && !(k in I.DICT.en), k);
+    assert.ok(!all.includes("'" + k + "'") && !all.includes('"' + k + '"') && !all.includes(':' + k + '"'), k + ' 仍被引用');
+  }
+  for (const k of ['bg.profileNvFailed', 'profile.text', 'profile.import', 'backup.title', 'site.nvPreset', 'site.nvPresetRemove']) {
+    for (const l of ['zh', 'en']) assert.ok(I.DICT[l][k], l + ' ' + k);
+  }
+  assert.equal(I.DICT.zh['options.title'], '配置档与备份');
+  assert.deepEqual([I.DICT.zh['profile.title'], I.DICT.zh['nv.preset'], I.DICT.zh['backup.title']], ['配置档', '预设', '备份']);
+  // 「本网站套用」和「夜间套用预设」「其余时间套用」同一种说法
+  assert.ok(/套用$/.test(I.DICT.zh['site.nvPreset']) && /use$/.test(I.DICT.en['site.nvPreset']));
+  for (const l of ['zh', 'en']) {
+    for (const k of Object.keys(I.DICT[l]).filter((x) => /^(profile|site\.nvPreset|bg\.(profile|site))/.test(x))) {
+      assert.ok(!/约|大概|可能|\bmay\b|\bmight\b|\bprobably\b/.test(I.DICT[l][k]), l + ' ' + k);
+    }
+  }
 });
 
 // ---------- 运行 ----------

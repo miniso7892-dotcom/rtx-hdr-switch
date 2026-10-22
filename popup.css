@@ -423,3 +423,81 @@ input[type="number"] {
 .shortcuts kbd { padding: 0 6px; border: 2px solid var(--ink); font: 800 11px/18px var(--f-ui); white-space: nowrap; }
 
 .shortcuts .unset { color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+/* ---------- 配置档 ---------- */
+
+.pf-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+
+.pf-list:empty { display: none; }
+
+.pf-list li { display: flex; align-items: center; gap: 10px; }
+
+.pf-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 700 13px var(--f-cjk);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pf-name[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+
+.pf-n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.pf-mod { margin-left: auto; flex: none; font: 800 10px var(--f-ui); letter-spacing: .04em; }
+
+.pf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+.pf-form { display: flex; flex-direction: column; gap: 6px; }
+
+.pf-input {
+  width: 100%;
+  padding: 4px 6px;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 700 12px var(--f-cjk);
+}
+
+textarea.pf-input { resize: vertical; font: 500 11px/1.4 Consolas, "Courier New", monospace; }
+
+.check-inline { min-height: 26px; padding: 0; border: 0; font-size: 12px; }
+
+.pf-msg { margin: 0; font-size: 11.5px; font-weight: 700; line-height: 1.45; }
+
+.pf-msg:empty { display: none; }
+
+.pf-msg.warn { color: var(--warn); }
+
+/* 已绑定 NVIDIA 预设的网站 */
+
+.site-binds { flex: none; list-style: none; margin: 0; padding: 4px 14px 6px; border-bottom: 2px solid var(--rule); }
+
+.site-binds li { display: flex; align-items: center; gap: 8px; min-height: 26px; font-size: 12px; font-weight: 700; }
+
+.site-binds .sb-host { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.site-binds .sb-preset { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+
+.site-binds button {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 800 13px/1 var(--f-ui);
+  cursor: pointer;
+}
