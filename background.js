@@ -4,7 +4,7 @@
  * 汇总各标签页上报的观看时间做「连续观看提醒」；
  * 通过本地组件（native messaging）读写 NVIDIA 全局设置：定时切换预设、「下一个预设」快捷键、撤销、弹窗兜底；
  * NVIDIA 写入统一经 nvWrite（互斥 + 修改记录）。settings 只由这里写（settingsTxn），其他页面提交补丁。
- * 解压安装时每天最多查一次 GitHub 上的新版本（图标加小点提醒）；给诊断页拼快照。
+ * 解压安装时检查 GitHub 上的新版本（成功后隔 24 小时，图标加小点提醒）；给诊断页拼快照。
  */
 'use strict';
 
@@ -76,7 +76,7 @@ const PANEL_FRAMES_KEY = 'panelFrames';
 const PANEL_FRAMES_MAX = 8; // 每个标签页最多登记几个面板 iframe（多了先丢最早的）
 const PANEL_CLAIM_MS = 30000; // 面板认领 nonce 后这么久内要等到内容脚本来登记
 const PANEL_NONCE_RE = /^[0-9a-f]{32}$/;
-// 更新检查（只对解压安装）：闹钟每 180 分钟叫醒一次，真正请求由 L.updateDue 决定（每天最多一次，退避期内不请求）
+// 更新检查（只对解压安装）：闹钟每 180 分钟叫醒一次，真正请求由 L.updateDue 决定（成功后隔 24 小时，退避期内不请求）
 const UPDATE_KEY = 'updateState';
 const UPDATE_ALARM = 'update-check';
 const UPDATE_API = 'https://api.github.com/repos/miniso7892-dotcom/rtx-hdr-switch/releases/latest';

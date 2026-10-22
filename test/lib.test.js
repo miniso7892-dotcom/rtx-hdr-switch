@@ -3297,6 +3297,58 @@ test('i18n P6：删掉的说明键不再出现，用到的键齐全，没有含�
   }
 });
 
+// ---------- 1.3 P8：界面文字收尾、文档 ----------
+
+test('i18n P8：时段预设的说明行删掉，只留缺预设、缺本地组件的提示；界面文字没有含糊词', () => {
+  const I = require('../i18n.js');
+  const all = ['popup.js', 'popup.html', 'panel.js', 'panel.html', 'options.js', 'options.html', 'diag.js', 'diag.html', 'background.js', 'content.js']
+    .map((f) => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n');
+  for (const k of ['nv.scheduleHint', 'nv.scheduleHintMissing']) {
+    assert.ok(!(k in I.DICT.zh) && !(k in I.DICT.en), k);
+    assert.ok(!all.includes("'" + k + "'") && !all.includes('"' + k + '"'), k + ' 仍被引用');
+  }
+  const popup = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
+  assert.ok(/setText\('nv-schedule-hint', hint\);\s*\$\('nv-schedule-hint'\)\.hidden = !hint;/.test(popup), '没有提示时隐藏这一行');
+  for (const l of ['zh', 'en']) {
+    for (const [k, v] of Object.entries(I.DICT[l])) {
+      const bad = l === 'zh' ? /约|大概|大约|可能|也许|似乎/ : /\babout\b|\bmay\b|\bmight\b|\bprobably\b|\bapproximately\b|\broughly\b|\bperhaps\b/i;
+      assert.ok(!bad.test(v), l + ' ' + k + '：' + v);
+    }
+  }
+});
+
+test('页面里 data-i18n 元素的默认文字和中文文案一致（含 aria-label）', () => {
+  const I = require('../i18n.js');
+  for (const f of ['popup.html', 'panel.html', 'options.html', 'diag.html']) {
+    const html = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    let m;
+    const re = /data-i18n="([^"]+)"[^>]*>([^<]*)</g;
+    while ((m = re.exec(html))) {
+      if (m[2]) assert.equal(m[2], I.DICT.zh[m[1]], f + ' ' + m[1]);
+    }
+    const ra = /aria-label="([^"]+)"[^>]*data-i18n-attr="aria-label:([^;"]+)/g;
+    while ((m = ra.exec(html))) assert.equal(m[1], I.DICT.zh[m[2]], f + ' aria ' + m[2]);
+  }
+});
+
+test('README：1.3 新命令都写进快捷键说明，权限表和 manifest 一致，没有「·」', () => {
+  const I = require('../i18n.js');
+  const man = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+  const docs = { en: fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8'), zh: fs.readFileSync(path.join(ROOT, 'README.zh-CN.md'), 'utf8') };
+  for (const l of ['en', 'zh']) {
+    const md = docs[l];
+    assert.ok(!md.includes('·'), l + ' README 含「·」');
+    for (const c of ['peek', 'next-profile', 'nv-undo']) {
+      const name = I.DICT[l]['cmd.' + c];
+      assert.ok(md.includes(l === 'en' ? name.slice(0, 20) : name), l + ' README 缺命令 ' + c + '：' + name);
+    }
+    for (const p of man.permissions) assert.ok(md.includes('| `' + p + '` |'), l + ' README 权限表缺 ' + p);
+    assert.ok(!md.includes('| `tabs` |'), l + ' README 权限表还有 tabs');
+    assert.ok(md.includes('api.github.com'), l + ' README 隐私一节没写更新检查');
+  }
+  assert.ok(/## 1\.3：/.test(fs.readFileSync(path.join(ROOT, 'SPEC.md'), 'utf8')), 'SPEC 缺 1.3 一节');
+});
+
 // ---------- 运行 ----------
 
 let passed = 0;

@@ -171,7 +171,7 @@
             <input type="range" id="nv-peak" step="10">
             <input type="number" class="val" id="nv-peak-num" step="1" inputmode="numeric" aria-label="最高亮度（尼特）" data-i18n-attr="aria-label:nv.peakNits">
           </div>
-          <p class="note" id="nv-peak-hint" hidden data-i18n="nv.peakHint">超过约 1000 尼特后驱动实际输出不再变亮</p>
+          <p class="note" id="nv-peak-hint" hidden data-i18n="nv.peakHint">超过 1000 尼特后驱动实际输出不再变亮</p>
           <div class="slider-row">
             <label for="nv-middleGrey" data-i18n="nv.middleGrey">中间灰</label>
             <input type="range" id="nv-middleGrey" min="10" max="100" step="1">
@@ -212,7 +212,7 @@
         </div>
         <p class="note warn" id="nv-vsr-reason" role="status" hidden></p>
         <label class="check row-check" id="nv-indicator-row"><input type="checkbox" id="nv-indicator"><span data-i18n="nv.indicator">在视频上显示 NVIDIA 状态指示器</span></label>
-        <p class="note" id="nv-app-hint" data-i18n="nv.appHint">NVIDIA App 开着时，要离开再进入它的「视频」页才会显示新值；在旧页面上调整会把这里的修改改回去。</p>
+        <p class="note" id="nv-app-hint" data-i18n="nv.appHint">NVIDIA App 窗口打开时，要离开再进入它的「视频」页才会显示新值；在旧页面上调整会把这里的修改改回去。</p>
       </div>
       <div class="nv-last" id="nv-last" hidden>
         <span class="nv-last-text" id="nv-last-text"></span>
@@ -315,7 +315,7 @@
       <label class="check row-check"><input type="checkbox" id="fullscreen-web"><span data-i18n="rules.fullscreenWeb">网页全屏也算全屏</span></label>
 
       <div class="row row-tall">
-        <span class="label-stack"><span id="hdr-only-label" data-i18n="rules.hdrOnly">只关 HDR，保留超分</span><span class="sub" id="hdr-only-desc" data-i18n="rules.hdrOnlyDesc">关的是 NVIDIA 全局 HDR：同时播放的其他视频也会变成 SDR</span></span>
+        <span class="label-stack"><span id="hdr-only-label" data-i18n="rules.hdrOnly">只关 HDR，保留超分</span><span class="sub" id="hdr-only-desc" data-i18n="rules.hdrOnlyDesc">关闭的是 NVIDIA 全局 HDR：同时播放的其他视频也会变成 SDR</span></span>
         <label class="switch">
           <input type="checkbox" id="hdr-only" role="switch" aria-labelledby="hdr-only-label" aria-describedby="hdr-only-desc">
           <span class="track" aria-hidden="true"></span>

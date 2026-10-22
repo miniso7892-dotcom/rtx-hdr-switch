@@ -725,9 +725,9 @@
       $(id).disabled = !presets.length; // 只有「不切换」可选
     }
     const missing = nv.mode === 'missing';
-    setText('nv-schedule-hint', !presets.length
-      ? t(missing ? 'nv.scheduleNeedHost' : 'nv.scheduleNeedPresets')
-      : t('nv.scheduleHint') + (missing ? t('nv.scheduleHintMissing') : ''));
+    const hint = !presets.length ? t(missing ? 'nv.scheduleNeedHost' : 'nv.scheduleNeedPresets') : missing ? t('panel.hostMissing') : '';
+    setText('nv-schedule-hint', hint);
+    $('nv-schedule-hint').hidden = !hint;
     renderSitePresets();
   }
 
