@@ -71,8 +71,9 @@
           <span class="select">
             <select id="site-rule">
               <option value="" data-i18n="site.follow">跟随规则</option>
-              <option value="on" data-i18n="site.on">总是开 HDR</option>
-              <option value="off" data-i18n="site.off">总是关 HDR</option>
+              <option value="on" data-i18n="site.on">总是开启 HDR</option>
+              <option value="off" data-i18n="site.off">总是关闭 HDR</option>
+              <option value="fullscreen" data-i18n="site.fullscreen">仅全屏时开启 HDR</option>
             </select>
           </span>
         </div>
@@ -258,10 +259,12 @@
       <div class="row">
         <span id="default-label" data-i18n="rules.default">没有规则时</span>
         <span class="seg" role="radiogroup" aria-labelledby="default-label">
-          <label><input type="radio" name="default-state" value="on"><span data-i18n="rules.defaultOn">开 HDR</span></label>
-          <label><input type="radio" name="default-state" value="off"><span data-i18n="rules.defaultOff">关 HDR</span></label>
+          <label><input type="radio" name="default-state" value="on"><span data-i18n="rules.defaultOn">开启 HDR</span></label>
+          <label><input type="radio" name="default-state" value="off"><span data-i18n="rules.defaultOff">关闭 HDR</span></label>
+          <label><input type="radio" name="default-state" value="fullscreen"><span data-i18n="rules.defaultFullscreen">仅全屏</span></label>
         </span>
       </div>
+      <label class="check row-check"><input type="checkbox" id="fullscreen-web"><span data-i18n="rules.fullscreenWeb">网页全屏也算全屏</span></label>
 
       <div class="row row-tall">
         <span class="label-stack"><span id="hdr-only-label" data-i18n="rules.hdrOnly">只关 HDR，保留超分</span><span class="sub" id="hdr-only-desc" data-i18n="rules.hdrOnlyDesc">关的是 NVIDIA 全局 HDR：同时播放的其他视频也会变成 SDR</span></span>

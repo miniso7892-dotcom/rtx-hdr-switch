@@ -311,7 +311,7 @@
     setText('btn-toggle', on ? t('video.toSdr') : t('video.toHdr'));
     btn.classList.toggle('to-hdr', !pending && !on);
     const forget = $('btn-forget');
-    forget.disabled = !(st.manual || st.saved);
+    forget.disabled = !(st.manual || st.saved || st.tab);
     forget.title = forget.disabled ? t('video.forgetDisabled') : '';
   }
 
@@ -372,6 +372,9 @@
     setChecked('eye-autooff', s.eye.autoOff);
     $('eye-autooff').disabled = s.eye.minutes === 0;
     for (const r of radios('default-state')) r.checked = r.value === s.defaultState;
+    setChecked('fullscreen-web', s.fullscreenWeb);
+    // 只有用到「仅全屏」（没有规则时，或某个网站规则）时才有意义
+    $('fullscreen-web').disabled = !usesFullscreen(s);
     setChecked('remember-manual', s.rememberManual);
     setChecked('show-osd', s.osd);
     setChecked('player-button', s.playerButton);
@@ -385,6 +388,12 @@
     if (current) renderState(current);
     if (nv.state) nvRender();
     renderSdr();
+  }
+
+  function usesFullscreen(s) {
+    if (s.defaultState === 'fullscreen') return true;
+    for (const h of Object.keys(s.sites)) if (s.sites[h] === 'fullscreen') return true;
+    return false;
   }
 
   function renderFoot() {
@@ -496,7 +505,7 @@
     }
     onChange('site-rule', (el) => save((s) => {
       if (!tabHost) return;
-      if (el.value === 'on' || el.value === 'off') s.sites[tabHost] = el.value;
+      if (el.value === 'on' || el.value === 'off' || el.value === 'fullscreen') s.sites[tabHost] = el.value;
       else delete s.sites[tabHost];
     }));
     onChange('auto-mode', (el) => save((s) => {
@@ -524,6 +533,7 @@
     for (const r of radios('default-state')) {
       r.addEventListener('change', () => { if (r.checked) save((s) => { s.defaultState = r.value; }); });
     }
+    onChange('fullscreen-web', (el) => save((s) => { s.fullscreenWeb = el.checked; }));
     onChange('remember-manual', (el) => save((s) => { s.rememberManual = el.checked; }));
     onChange('show-osd', (el) => save((s) => { s.osd = el.checked; }));
     onChange('player-button', (el) => save((s) => { s.playerButton = el.checked; }));

@@ -106,16 +106,18 @@ function sanitizeReport(msg, ts, doc) {
     white: num(msg.white),
     autoUnknown: str(msg.autoUnknown),
     fullscreen: !!msg.fullscreen,
+    fsFrame: !!msg.fsFrame,
     doc: doc || null,
     ts: ts
   };
 }
 
 function sanitizeTab(raw) {
-  const out = { frames: {}, topDoc: null };
+  const out = { frames: {}, topDoc: null, fsHint: -1 };
   if (raw && typeof raw === 'object') {
     if (raw.frames && typeof raw.frames === 'object') out.frames = raw.frames;
     if (typeof raw.topDoc === 'string') out.topDoc = raw.topDoc;
+    if (Number.isInteger(raw.fsHint) && raw.fsHint > 0) out.fsHint = raw.fsHint;
   }
   return out;
 }
@@ -187,6 +189,7 @@ async function handleReport(msg, sender) {
     if (top && t.topDoc !== top) {
       if (msg.bye) return eyeReply; // 不认识的旧顶层文档在告别，不用管
       t.topDoc = top;
+      t.fsHint = -1;
       badgeSig.delete(tabId);
       for (const id of Object.keys(t.frames)) if (id !== '0') delete t.frames[id];
     }
@@ -212,11 +215,30 @@ async function handleReport(msg, sender) {
     for (const id of ids.slice(0, ids.length - MAX_FRAMES_PER_TAB)) delete t.frames[id];
   }
 
+  const fsTarget = updateFsHint(tabId, t, now);
   schedulePersist(tabId);
   await refreshBadge(tabId, t);
   if (settingsCache && settingsCache.hdrOnly) hoSchedule();
-  // 告诉内容脚本它在哪个标签页、哪个 frame：「只关 HDR」只对借开关时看的那个 frame 生效
-  return Object.assign({ tabId: tabId, frameId: frameId }, eyeReply);
+  // 告诉内容脚本它在哪个标签页、哪个 frame：「只关 HDR」只对借开关时看的那个 frame 生效；
+  // 子 frame 还会知道父页面是不是把它设为了全屏（推送丢了时的兜底）
+  const reply = { tabId: tabId, frameId: frameId };
+  if (frameId > 0) reply.topFs = frameId === fsTarget;
+  return Object.assign(reply, eyeReply);
+}
+
+// 父页面把 iframe 设为全屏（顶层报告带 fsFrame）：选出该通知的子 frame，目标变了就推送 fs-hint（旧目标 off、新目标 on）
+function updateFsHint(tabId, t, now) {
+  const target = L.fsHintTarget(t.frames, now, STALE_MS, CHILD_DEAD_MS);
+  const prev = Number.isInteger(t.fsHint) ? t.fsHint : -1;
+  if (target === prev) return target;
+  t.fsHint = target;
+  if (prev > 0) sendFsHint(tabId, prev, false);
+  if (target > 0) sendFsHint(tabId, target, true);
+  return target;
+}
+
+function sendFsHint(tabId, frameId, on) {
+  call(() => chrome.tabs.sendMessage(tabId, { type: 'fs-hint', on: on }, { frameId: frameId })).catch(noop);
 }
 
 // ---------- 角标 ----------

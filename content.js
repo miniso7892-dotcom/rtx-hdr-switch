@@ -54,9 +54,19 @@
     'border-radius:0 !important;background:rgba(10,10,10,.9) !important;color:#FAFAFA !important;' +
     'font:700 14px/1.45 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif !important;' +
     'letter-spacing:.02em !important;overflow:hidden !important;' +
-    'box-shadow:0 0 0 2px rgba(250,250,250,.14),0 4px 14px rgba(0,0,0,.4) !important;transition:opacity .35s ease !important;';
+    'box-shadow:0 0 0 2px rgba(250,250,250,.14),0 4px 14px rgba(0,0,0,.4) !important;transition:none !important;';
   const OSD_INNER_CSS = ':host{all:initial}.m{display:inline-block;width:9px;height:9px;margin:0 9px 1px 0;vertical-align:middle}' +
-    '.t{font:inherit;color:inherit}';
+    '.t{font:inherit;color:inherit}' +
+    '.b{display:block;margin:6px 0 0 18px;padding:3px 8px;border:0;border-radius:0;background:#FAFAFA;color:#0A0A0A;' +
+    'font:700 12px/1.45 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;cursor:pointer;text-align:left}' +
+    '.b:focus-visible{outline:2px solid #FAFAFA;outline-offset:2px}';
+  // 按住对比的小标记（紧凑）。所有提示都盖在视频上：不用透明度过渡，隐藏时立即移除
+  const OSD_PEEK_CSS = 'padding:4px 8px !important;font-size:12px !important;';
+  // 提议「本标签页后续视频沿用」的提示显示多久；peek 命令开始后多久内重复到达的命令忽略（按键自动重复）
+  const OFFER_MS = 4000;
+  const PEEK_REPEAT_MS = 500;
+  // 收到 fs-hint 推送后这么久内，报告回复里的 topFs 和它不一致时不信（回复可能是推送之前算的）
+  const FS_HINT_TRUST_MS = 1500;
   // background 写的「只关 HDR」状态：{active: 用全局开关代替逐视频滤镜, leased, error?}
   const HDR_ONLY_KEY = 'hdrOnlyStatus';
 
@@ -115,8 +125,19 @@
   let osdEl = null;
   let osdText = null; // 放文字的节点（closed shadow root 里的 span；不支持 shadow root 时就是 osdEl 本身）
   let osdMark = null;
+  let osdBtn = null;  // 提议「本标签页沿用」时显示的按钮（closed shadow root 里）
+  let osdKind = '';   // 当前提示的种类：'' 普通，'peek' 对比标记，'offer' 带按钮的提议
+  let osdOffer = '';  // 提议里按钮对应的状态
   let osdHideTimer = 0;
-  let osdRemoveTimer = 0;
+  // 按住对比：{video, key, base 决策状态, state 显示状态, source 'button'|'key'|'panel'|'command', at, timer}
+  let peek = null;
+  // 本标签页沿用：{state, at}；只在内存里，跟着当前文档走（刷新、整页导航后失效）
+  let tabSticky = null;
+  let lastManual = null; // 上一次对主视频的手动切换 {key, state}
+  const tabNotified = new Set(); // 由沿用决定时已经提示过的视频 key
+  let fsElNow = null;     // 本 frame 的全屏元素（沿 shadow 往下找到的），evaluate 和 fullscreenchange 时更新
+  let topFsHint = false;  // 子 frame：父页面把本 frame 所在的 iframe 设为了全屏（background 转发）
+  let fsHintAt = 0;       // 上一次收到 fs-hint 推送的时间
 
   function noop() {}
 
@@ -380,12 +401,13 @@
     return L.isOffFilter(style.getPropertyValue('filter')) && style.getPropertyPriority('filter') === 'important';
   }
 
-  function applyState(v, want) {
+  // raw：按 want 原样加或去滤镜（对比、页面冲掉滤镜后补回），不做「只关 HDR」的替换
+  function applyState(v, want, raw) {
     const st = v.style;
     const ds = v.dataset;
     if (!st || !ds) return;
     // 「只关 HDR」模式：主视频仍走 overlay（超分保留），HDR 由 background 关掉全局开关来关
-    const state = want === 'off' && hdrOnly && v === primary ? 'on' : want;
+    const state = want === 'off' && !raw && hdrOnly && v === primary ? 'on' : want;
     if (state === 'off') {
       if (!isOurs(st)) {
         const orig = st.getPropertyValue('filter');
@@ -431,7 +453,8 @@
         setContested(v, info, now);
         continue;
       }
-      applyState(v, 'off');
+      // data-rtxhdr 为 off 的视频一定是加了滤镜的（对比时「只关 HDR」的主视频也可能是）
+      applyState(v, 'off', true);
     }
   }
 
@@ -492,9 +515,11 @@
     let manual = info.manualKey === key ? info.manual : null;
     // 护眼 SDR 作用于主视频；在它之后的手动切换优先
     if (eyeRestAt && v === primary && !(manual && info.manualAt > eyeRestAt)) manual = EYE_OFF;
+    // 本标签页沿用压过视频记忆：不用等记忆读出来（仍然预读），换视频时不会先闪一下
+    const tab = owner && tabSticky ? tabSticky.state : null;
     if (owner && !manual && !savedRules.has(key)) {
       loadRule(key);
-      return null;
+      if (!tab) return null;
     }
     const det = owner && !skipAuto && settings.autoDetect !== 'off' ? detectorFor(info) : null;
     return L.decide({
@@ -502,10 +527,70 @@
       hostname: hostname,
       topHostname: topHostname,
       manual: manual,
+      tab: tab,
       saved: owner ? savedRules.get(key) : null,
+      fullscreen: v === primary && isFullscreenFor(v),
       autoState: det ? det.state : null
     });
   }
+
+  // ---------- 全屏判定（「仅全屏时开启 HDR」） ----------
+
+  // node 在 root 里面吗（遇到 shadow root 跳到它的 host）
+  function containsDeep(root, node) {
+    for (let n = node, i = 0; n && i < 4096; i++) {
+      if (n === root) return true;
+      const p = n.parentNode;
+      n = p && p.nodeType === 11 && p.host ? p.host : p;
+    }
+    return false;
+  }
+
+  // 本 frame 的视口不小于屏幕的 1/4：父页面「关」的通知丢了时，小尺寸的嵌入不会一直被当成全屏
+  function frameFillsScreen() {
+    let sw = 0, sh = 0;
+    try { sw = screen.width; sh = screen.height; } catch (e) { return true; }
+    return !(sw > 0 && sh > 0) || window.innerWidth * window.innerHeight * 4 >= sw * sh;
+  }
+
+  // 主视频是否算在全屏里：本 frame 的全屏元素包含它；父页面把本 frame 设为全屏；网页全屏（设置允许时）。
+  // 画中画和 F11 浏览器全屏都不算
+  function isFullscreenFor(v) {
+    if (fsElNow) return containsDeep(fsElNow, v);
+    if (!isTop && topFsHint && frameFillsScreen()) return true;
+    const site = btnSite ? PLAYER_BARS[btnSite] : null;
+    if (!settings.fullscreenWeb || !site || !site.webFull) return false;
+    try { return !!v.closest(site.webFull); } catch (e) { return false; }
+  }
+
+  // 顶层 frame：全屏的是别的东西（iframe 本身，或里面有个占视口一半以上的 iframe），不是顶层自己的主视频。
+  // background 据此通知那个子 frame（fs-hint）
+  function fsFrameNow() {
+    const fs = fsElNow;
+    if (!fs || (primary && containsDeep(fs, primary))) return false;
+    if (fs.localName === 'iframe' || fs.localName === 'frame') return true;
+    const half = window.innerWidth * window.innerHeight / 2;
+    let list = null;
+    try { list = fs.querySelectorAll('iframe,frame'); } catch (e) { return false; }
+    for (let i = 0; i < list.length; i++) {
+      const r = list[i].getBoundingClientRect();
+      if (r.width * r.height >= half) return true;
+    }
+    return false;
+  }
+
+  function setTopFsHint(on) {
+    if (isTop || on === topFsHint) return;
+    topFsHint = on;
+    // 全屏时 iframe 的视口跟着变大：1/4 屏幕的检查要重新算
+    try {
+      if (on) window.addEventListener('resize', onFsResize);
+      else window.removeEventListener('resize', onFsResize);
+    } catch (e) { /* ignore */ }
+    scheduleEvaluate();
+  }
+
+  const onFsResize = guard(function () { scheduleEvaluate(); });
 
   function scheduleEvaluate() {
     if (destroyed || evalTimer) return;
@@ -530,6 +615,7 @@
     }
     const vw = window.innerWidth;
     const vh = window.innerHeight;
+    fsElNow = deepElement('fullscreenElement');
     const pip = deepElement('pictureInPictureElement');
     const list = [];
     const cands = [];
@@ -561,6 +647,9 @@
       pi.ownerKey = keyOf(pi);
     }
 
+    // 对比中的视频被移除了：对比结束（它不在 list 里，下面不会再看到它）
+    if (peek && !videos.has(peek.video)) peekClear();
+
     const now = Date.now();
     for (const v of list) {
       const info = infoOf(v);
@@ -575,14 +664,27 @@
         info.secFights = 0;
       }
       const want = drm ? 'on' : d.state;
-      if (want !== 'off' || !info.contested) applyState(v, want);
+      // 对比只改显示：主视频、视频 key、决策状态都没变时按对比的状态加或去滤镜，否则对比就地结束。
+      // info.eff、报告、角标、护眼计时、「只关 HDR」的借用都仍按决策状态
+      let shown = want;
+      if (peek && peek.video === v) {
+        if (v === primary && key === peek.key && want === peek.base && !drm && !(peek.state === 'off' && info.contested)) shown = peek.state;
+        else peekClear();
+      }
+      if (shown !== 'off' || !info.contested) applyState(v, shown, shown !== want);
       const eff = want === 'off' && info.contested ? 'on' : want;
       const prevEff = info.decisionKey === key ? info.eff : null;
       info.decision = d;
       info.decisionKey = key;
       info.eff = eff;
-      if (v === primary && !quiet && !drm && !info.contested && prevEff && prevEff !== eff) {
-        showOsd(L.osdText(eff, d.reason, lang), OSD_MS, v, false);
+      if (v === primary && !quiet && !drm && !info.contested) {
+        if (prevEff && prevEff !== eff) {
+          showOsd(L.osdText(eff, d.reason, lang), OSD_MS, v, false);
+        } else if (!prevEff && d.reason === 'tab' && !tabNotified.has(key)) {
+          // 新视频由「本标签页沿用」决定：每个视频提示一次
+          tabNotify(key);
+          showOsd(L.osdText(eff, 'tab', lang), OSD_MS, v, false);
+        }
       }
     }
     updateSampler();
@@ -602,9 +704,9 @@
       return false;
     }
     if (detectorFor(info).settled) return false;
-    // 更高优先级规则已命中，或默认就是关，就没必要采样
+    // 更高优先级规则已命中，或默认就是关（不全屏时的「仅全屏」也是），就没必要采样
     const base = decideFor(v, info, true);
-    return !!base && base.reason === 'default' && base.state === 'on';
+    return !!base && (base.reason === 'default' || base.reason === 'fullscreen') && base.state === 'on';
   }
 
   function updateSampler() {
@@ -690,8 +792,10 @@
     return shadowRootOf(fs) || fs;
   }
 
-  function showOsd(text, ms, video, force) {
-    if (!force && !settings.osd) return;
+  // kind：'peek' 对比标记（紧凑，关了屏幕提示也显示）；'offer' 带按钮的提议（可以点）；其他为普通提示
+  function showOsd(text, ms, video, force, kind) {
+    const k = kind === 'peek' || kind === 'offer' ? kind : '';
+    if (!force && k !== 'peek' && !settings.osd) return;
     const root = document.documentElement;
     if (!root) return;
     if (!osdEl) {
@@ -705,12 +809,25 @@
         osdMark.className = 'm';
         osdText = document.createElement('span');
         osdText.className = 't';
-        sr.append(style, osdMark, osdText);
+        osdBtn = document.createElement('button');
+        osdBtn.className = 'b';
+        osdBtn.type = 'button';
+        osdBtn.addEventListener('click', onOfferClick);
+        sr.append(style, osdMark, osdText, osdBtn);
+        // 可以点的提议盖在播放器上：点它不能传到网站（暂停、显示控制栏、双击全屏、右键菜单）
+        for (const t of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) {
+          osdEl.addEventListener(t, onOsdPointer);
+        }
       } catch (e) {
         osdText = osdEl;
         osdMark = null;
+        osdBtn = null;
       }
     }
+    const offer = k === 'offer' && !!osdBtn;
+    osdKind = offer || k === 'peek' ? k : '';
+    if (osdBtn) osdBtn.style.display = offer ? '' : 'none';
+    if (!offer) osdOffer = '';
     if (osdMark) osdMark.style.background = settings.ui.accent;
     const parent = osdParent() || root;
     const vw = window.innerWidth;
@@ -724,21 +841,51 @@
       }
     }
     const maxW = Math.max(160, Math.round(vw - left - 16));
-    // 护眼提醒等长文字允许换行，状态提示保持一行
-    const wrap = force ? 'white-space:normal !important;' : 'white-space:nowrap !important;text-overflow:ellipsis !important;';
-    osdEl.style.cssText = OSD_CSS + wrap + 'max-width:' + maxW + 'px !important;left:' + Math.round(left) +
+    // 护眼提醒、提议等长文字允许换行，状态提示保持一行
+    const wrap = force || offer ? 'white-space:normal !important;' : 'white-space:nowrap !important;text-overflow:ellipsis !important;';
+    const extra = (k === 'peek' ? OSD_PEEK_CSS : '') + (offer ? 'pointer-events:auto !important;' : '');
+    osdEl.style.cssText = OSD_CSS + wrap + extra + 'max-width:' + maxW + 'px !important;left:' + Math.round(left) +
       'px !important;top:' + Math.round(top) + 'px !important;opacity:1 !important;';
     osdText.textContent = text;
     if (osdEl.parentNode !== parent) parent.appendChild(osdEl);
     clearTimeout(osdHideTimer);
-    clearTimeout(osdRemoveTimer);
     osdHideTimer = setTimeout(hideOsd, ms);
   }
 
   const hideOsd = guard(function () {
     if (!osdEl) return;
-    osdEl.style.setProperty('opacity', '0', 'important');
-    osdRemoveTimer = setTimeout(removeOsd, 400);
+    osdOffer = '';
+    osdKind = '';
+    removeOsd();
+  });
+
+  // 只收起对比标记（别的提示已经盖掉它时不动）
+  function hidePeekOsd() {
+    if (osdKind !== 'peek') return;
+    osdKind = '';
+    clearTimeout(osdHideTimer);
+    removeOsd();
+  }
+
+  // 屏幕提示上的提议：手动切换的提示加一个「本标签页后续视频都……」按钮
+  function showOffer(text, state, video) {
+    showOsd(text, OFFER_MS, video, false, 'offer');
+    if (osdKind !== 'offer') return;
+    osdOffer = state;
+    osdBtn.textContent = L.t(lang, state === 'on' ? 'content.tabOfferOn' : 'content.tabOfferOff');
+  }
+
+  const onOfferClick = guard(function (e) {
+    if (!e.isTrusted || osdKind !== 'offer' || !osdOffer) return;
+    const state = osdOffer;
+    osdOffer = '';
+    setTabSticky(state);
+  });
+
+  const onOsdPointer = guard(function (e) {
+    e.stopPropagation();
+    if (e.type === 'mousedown') e.preventDefault(); // 不抢焦点（焦点留在播放器上）
+    if (e.type === 'contextmenu') e.preventDefault();
   });
 
   function removeOsd() {
@@ -766,8 +913,104 @@
       storageCall(() => chrome.storage.local.remove(L.EYE_REST_KEY));
     }
     if (settings.rememberManual && key) saveRule(key, state);
+    // 在下一个视频上又做了同样的切换：提示里提议「本标签页后续视频沿用」；沿用开着时最新的选择接着沿用
+    let offer = false;
+    if (v === primary && key) {
+      offer = settings.osd && L.tabOffer(lastManual, key, state, tabSticky);
+      if (tabSticky) tabSticky = { state: state, at: Date.now() };
+      lastManual = { key: key, state: state };
+    }
     evaluate(true);
-    showOsd(L.osdText(state, 'manual', lang), OSD_MS, v, false);
+    if (offer) showOffer(L.osdText(state, 'manual', lang), state, v);
+    else showOsd(L.osdText(state, 'manual', lang), OSD_MS, v, false);
+  }
+
+  // 本标签页后续视频沿用 state（'on' | 'off'；其他值 = 不再沿用）。只在内存里，不写视频记忆
+  function setTabSticky(state) {
+    const on = state === 'on' || state === 'off';
+    tabSticky = on ? { state: state, at: Date.now() } : null;
+    evaluate(true);
+    if (!on) return;
+    if (primary) tabNotify(keyOf(infoOf(primary)));
+    showOsd(L.t(lang, state === 'on' ? 'content.tabSetOn' : 'content.tabSetOff'), EYE_OSD_MS, primary, false);
+  }
+
+  function tabNotify(key) {
+    tabNotified.add(key);
+    if (tabNotified.size > 200) tabNotified.delete(tabNotified.values().next().value);
+  }
+
+  // ---------- 按住对比 ----------
+
+  // 不能对比时返回提示文字的 i18n 键，能对比返回空串
+  function peekGuard(v) {
+    if (!v || v !== primary) return 'content.noVideo';
+    if (v.mediaKeys) return 'content.drm';
+    const info = infoOf(v);
+    const d = info.decisionKey === keyOf(info) ? info.decision : null;
+    if (!d) return 'content.noVideo';
+    if (d.state === 'off' && info.contested) return 'content.contested';
+    // 全局 HDR 被「只关 HDR」借走了：没有 HDR 可以对比
+    if (d.state === 'off' && hdrOnly) return 'content.peekHdrOnly';
+    return '';
+  }
+
+  // 主视频临时变成相反的状态 ms 毫秒（不调用 setManual、不写视频记忆、不动护眼计时）
+  function peekStart(v, source, ms) {
+    evaluate(true);
+    // 按钮在这次求值里被换掉了：手势已经作废，不再开始对比（否则松开收不到，要等 30 秒）
+    if ((source === 'button' || source === 'key') && !(btnHold.held && btnHoldSrc === source)) {
+      swallowClick = false;
+      return false;
+    }
+    const why = peekGuard(v);
+    if (why) {
+      showOsd(L.t(lang, why), OSD_MS, v, false);
+      return false;
+    }
+    if (peek) peekClear();
+    const info = infoOf(v);
+    const base = info.decision.state;
+    const dur = Math.min(ms > 0 ? ms : L.PEEK_MAX_MS, L.PEEK_MAX_MS);
+    peek = { video: v, key: keyOf(info), base: base, state: base === 'on' ? 'off' : 'on', source: source,
+      at: Date.now(), timer: setTimeout(onPeekTimeout, dur) };
+    applyState(v, peek.state, true);
+    hideTip();
+    renderButton();
+    const st = peek.state === 'on' ? 'HDR' : 'SDR';
+    const text = source === 'command'
+      ? L.t(lang, 'content.peekTimed', { state: st, seconds: Math.round(dur / 1000) })
+      : L.t(lang, 'content.peek', { state: st });
+    showOsd(text, dur, v, false, 'peek');
+    return true;
+  }
+
+  // 只清掉对比状态，不重新求值（evaluate 里就地调用）
+  function peekClear() {
+    const p = peek;
+    if (!p) return;
+    peek = null;
+    clearTimeout(p.timer);
+    hidePeekOsd();
+  }
+
+  // 结束对比，视频回到决策状态。source 给了时只结束这个来源开始的对比
+  function peekEnd(source) {
+    if (!peek || (source && peek.source !== source)) return;
+    peekClear();
+    evaluate(true);
+  }
+
+  const onPeekTimeout = guard(function () { peekEnd(); });
+
+  // 命令 peek：对比 5 秒；对比中再按一次立即恢复（开始后 500 ms 内重复到达的忽略）
+  function peekCommand() {
+    if (peek) {
+      if (Date.now() - peek.at >= PEEK_REPEAT_MS) peekEnd();
+      return;
+    }
+    const v = controllablePrimary();
+    if (v) peekStart(v, 'command', L.PEEK_CMD_MS);
   }
 
   // 返回可以手动控制的主视频；没有时给出提示
@@ -830,8 +1073,12 @@
         i.manualAt = 0;
       }
     }
+    // 清除记忆时本标签页的沿用一起取消
+    const hadTab = !!tabSticky;
+    tabSticky = null;
+    lastManual = null;
     evaluate(true);
-    showOsd(L.t(lang, primary ? 'content.forgot' : 'content.noVideo'), OSD_MS, primary, false);
+    showOsd(L.t(lang, !primary ? 'content.noVideo' : hadTab ? 'content.forgotTab' : 'content.forgot'), OSD_MS, primary, false);
   }
 
   function saveRule(key, state) {
@@ -861,6 +1108,7 @@
   //   bars：控制栏右侧，依次取第一个找得到的；before：插在控制栏里含有它的那个子元素前面，依次找，
   //   都没有时 append 为真就加在最后，否则当作控制栏还没好
   //   make：照网站原生按钮的结构造按钮（大小、悬停、全屏变大、焦点框都用网站自己的 CSS）
+  //   webFull：网页全屏时视频 closest 能命中的选择器（「网页全屏也算全屏」）
   const PLAYER_BARS = Object.freeze({
     bilibili: {
       root: '.bpx-player-container',
@@ -868,6 +1116,7 @@
       bars: ['.bpx-player-control-bottom-right'],
       before: ['.bpx-player-ctrl-setting', '.bpx-player-ctrl-pip', '.bpx-player-ctrl-full'],
       append: true,
+      webFull: '.bpx-player-container[data-screen="web"]',
       make: makeBiliButton
     },
     youtube: {
@@ -935,6 +1184,11 @@
   let btnStyle = null;
   let btnSeq = 0;
   let btnSpace = false;
+  // 按住对比：按钮的指针和回车共用一个手势；按满 300 ms 后跟来的那个 click 吞掉
+  const btnHold = L.createHoldGesture(L.PEEK_HOLD_MS);
+  let btnHoldSrc = '';  // 'button'（指针）| 'key'（回车）
+  let btnHoldTimer = 0;
+  let swallowClick = false;
 
   // evaluate() 末尾调用：主视频所在播放器的控制栏里放一个按钮，状态跟着这个视频走
   function syncButtonNow() {
@@ -1018,6 +1272,11 @@
     el.classList.add(BTN_CLASS);
     el.setAttribute('data-rtxhdr-owner', TOKEN);
     b.addEventListener('mousedown', onBtnMouseDown);
+    b.addEventListener('pointerdown', onBtnPointerDown);
+    b.addEventListener('pointerup', onBtnPointerUp);
+    b.addEventListener('pointercancel', onBtnPointerCancel);
+    b.addEventListener('lostpointercapture', onBtnPointerCancel);
+    b.addEventListener('contextmenu', onBtnContextMenu);
     b.addEventListener('click', onBtnClick);
     b.addEventListener('keydown', onBtnKeyDown);
     b.addEventListener('keyup', onBtnKeyUp);
@@ -1090,6 +1349,12 @@
     const p = pbtn;
     if (!p) return;
     pbtn = null;
+    // 按钮被移除：按住的手势作废，从按钮开始的对比结束（可能在 evaluate 里，不重新求值）
+    holdReset();
+    if (peek && (peek.source === 'button' || peek.source === 'key')) {
+      peekClear();
+      scheduleEvaluate();
+    }
     try { p.el.remove(); } catch (e) { /* ignore */ }
     if (p.tip) { try { p.tip.remove(); } catch (e) { /* ignore */ } }
   }
@@ -1128,11 +1393,14 @@
     const v = p.video;
     const drm = !!(v && v.mediaKeys);
     const state = v ? effState(v) : 'on';
-    const sig = (drm ? 'drm' : state) + '|' + lang;
+    // 对比时图标跟着显示的状态走；aria-pressed 和文字仍按决策状态
+    const shown = peek && peek.video === v ? peek.state : state;
+    const sig = (drm ? 'drm' : state + '|' + shown) + '|' + lang;
     if (sig === p.sig) return;
     p.sig = sig;
     const b = p.btn;
     const sdr = !drm && state === 'off';
+    const iconSdr = !drm && shown === 'off';
     const text = drm ? L.t(lang, 'player.drm') : sdr ? L.t(lang, 'player.off') : L.t(lang, 'player.on');
     b.setAttribute('aria-label', text);
     if (drm) {
@@ -1143,8 +1411,8 @@
       b.removeAttribute('aria-disabled');
       b.setAttribute('aria-pressed', sdr ? 'false' : 'true');
     }
-    p.icon.on.style.display = sdr ? 'none' : '';
-    p.icon.off.style.display = sdr ? '' : 'none';
+    p.icon.on.style.display = iconSdr ? 'none' : '';
+    p.icon.off.style.display = iconSdr ? '' : 'none';
     if (p.dim) {
       p.dim.style.opacity = drm ? '0.4' : '';
       p.dim.style.cursor = drm ? 'default' : '';
@@ -1178,12 +1446,86 @@
   });
 
   const onBtnClick = guard(function (e) {
+    // 只认用户的点击：页面脚本合成的 click 不能切换、改写记忆或吃掉按住之后的 click
+    if (!e.isTrusted) return;
+    // 按住对比之后跟来的 click：不切换
+    if (swallowClick) {
+      swallowClick = false;
+      return;
+    }
     // 按钮有焦点时按空格，<button> 松开时会自己点一下：空格是播放器的，不切换（鼠标点击 detail ≥ 1，照常）
     if (btnSpace && e.detail === 0) return;
     pressButton();
   });
 
-  // 回车 = 点击（<button> 自己的回车点击被取消，避免切两次）；空格留给播放器
+  // 按下开始计时：300 ms 内松开是普通点击（指针走 click，回车在 keyup 里切换），按满就开始对比
+  function holdBegin(src) {
+    holdReset();
+    swallowClick = false;
+    btnHold.down(Date.now());
+    btnHoldSrc = src;
+    btnHoldTimer = setTimeout(onHoldDue, btnHold.holdMs);
+  }
+
+  const onHoldDue = guard(function () {
+    btnHoldTimer = 0;
+    if (btnHold.due(Date.now()) !== 'hold') {
+      // 计时器比 Date.now() 早到了一点：再等一帧
+      if (btnHold.pressed && !btnHold.held) btnHoldTimer = setTimeout(onHoldDue, 16);
+      return;
+    }
+    if (btnHoldSrc === 'button') swallowClick = true;
+    const p = pbtn;
+    const v = p && p.video && p.video.isConnected && videos.has(p.video) ? p.video : null;
+    if (v && v.mediaKeys) return; // 受版权保护时按钮是禁用的
+    peekStart(v || primary, btnHoldSrc, L.PEEK_MAX_MS);
+  });
+
+  // 松开：返回 'tap' | 'release' | null
+  function holdUp() {
+    clearTimeout(btnHoldTimer);
+    btnHoldTimer = 0;
+    const r = btnHold.up();
+    const src = btnHoldSrc;
+    btnHoldSrc = '';
+    if (r === 'release') peekEnd(src);
+    return r;
+  }
+
+  // 取消（不切换）：已经在对比就结束对比
+  function holdReset() {
+    clearTimeout(btnHoldTimer);
+    btnHoldTimer = 0;
+    const src = btnHoldSrc;
+    btnHoldSrc = '';
+    if (btnHold.cancel() === 'release' && peek && peek.source === src) {
+      peekClear();
+      scheduleEvaluate();
+    }
+  }
+
+  // 主指针（鼠标左键、触屏、触控笔）按下；捕获指针，移出按钮也能收到松开
+  const onBtnPointerDown = guard(function (e) {
+    if (!e.isTrusted || !e.isPrimary || e.button !== 0) return;
+    holdBegin('button');
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+  });
+
+  const onBtnPointerUp = guard(function (e) {
+    if (!e.isTrusted || btnHoldSrc !== 'button' || !e.isPrimary) return;
+    holdUp();
+  });
+
+  const onBtnPointerCancel = guard(function () {
+    if (btnHoldSrc === 'button') holdReset();
+  });
+
+  // 触屏长按：按满之后别弹出系统菜单
+  const onBtnContextMenu = guard(function (e) {
+    if (btnHold.held || swallowClick) e.preventDefault();
+  });
+
+  // 回车：短按（松开时）= 点击，按住 = 对比（<button> 自己的回车点击被取消，避免切两次）；空格留给播放器
   const onBtnKeyDown = guard(function (e) {
     if (e.key === ' ' || e.key === 'Spacebar') {
       btnSpace = true;
@@ -1192,11 +1534,20 @@
     if (e.key !== 'Enter' || e.isComposing) return;
     e.preventDefault();
     e.stopPropagation();
-    if (!e.repeat) pressButton();
+    if (e.repeat || !e.isTrusted) return;
+    holdBegin('key');
   });
 
   const onBtnKeyUp = guard(function (e) {
-    if (e.key === ' ' || e.key === 'Spacebar') setTimeout(clearBtnSpace, 0);
+    if (!e.isTrusted) return;
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      setTimeout(clearBtnSpace, 0);
+      return;
+    }
+    if (e.key !== 'Enter' || btnHoldSrc !== 'key') return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (holdUp() === 'tap') pressButton();
   });
 
   function clearBtnSpace() {
@@ -1205,9 +1556,10 @@
 
   const onBtnEnter = guard(function () { showTip(); });
   const onBtnLeave = guard(function () { hideTip(); });
-  // 空格按下后焦点离开（松开不在按钮上）：别让标记一直留着
+  // 空格按下后焦点离开（松开不在按钮上）：别让标记一直留着；回车按住时失去焦点：不切换，结束对比
   const onBtnBlur = guard(function () {
     btnSpace = false;
+    if (btnHoldSrc === 'key') holdReset();
     hideTip();
   });
   // 只有键盘焦点才显示提示
@@ -1409,6 +1761,9 @@
         scheduleEvaluate();
       }
     }
+    // 父页面把本 frame 设为全屏：fs-hint 推送丢了时，靠报告的回复兜底（心跳 3 秒）
+    // （推送刚到时，在它之前算好的回复可能晚到，先不信）
+    if (!isTop && typeof res.topFs === 'boolean' && Date.now() - fsHintAt > FS_HINT_TRUST_MS) setTopFsHint(res.topFs);
     if (!res.remind) return;
     const m = res.remind;
     showOsd(L.eyeReminderText(m.minutes, !!m.autoOff, typeof m.shortcut === 'string' ? m.shortcut : '', lang),
@@ -1446,10 +1801,15 @@
       mean: last ? round3(last.mean) : null,
       white: last ? round3(last.white) : null,
       autoUnknown: info ? info.unknown : null,
-      fullscreen: !!document.fullscreenElement
+      // 本 frame 自己的全屏元素包含主视频
+      fullscreen: !!(v && fsElNow && containsDeep(fsElNow, v))
     };
-    // 让 background 识别顶层文档换了，清掉旧页面子 frame 的报告（新版 Chrome 另有 documentId）
-    if (isTop) r.timeOrigin = Math.round(performance.timeOrigin);
+    if (isTop) {
+      // 让 background 识别顶层文档换了，清掉旧页面子 frame 的报告（新版 Chrome 另有 documentId）
+      r.timeOrigin = Math.round(performance.timeOrigin);
+      // 全屏的是某个 iframe：background 通知那个子 frame（fs-hint）
+      r.fsFrame = fsFrameNow();
+    }
     return r;
   }
 
@@ -1477,7 +1837,7 @@
     const r = buildReport();
     // 没有视频的子 frame 保持安静，避免广告 iframe 不停唤醒 service worker
     if (!isTop && !r.hasVideo && !everReported) return;
-    const sig = [r.hasVideo, r.playing, r.state, r.reason, r.key, r.drm, r.fullscreen, r.autoUnknown,
+    const sig = [r.hasVideo, r.playing, r.state, r.reason, r.key, r.drm, r.fullscreen, r.fsFrame, r.autoUnknown,
       r.offscreen, r.pip, Math.round(r.area / 4096)].join('|');
     if (!force && sig === lastSig) return;
     lastSig = sig;
@@ -1502,6 +1862,8 @@
     r.manual = !!(info && info.manualKey === r.key && info.manual);
     r.saved = saved ? saved.s : null;
     r.eyeRest = !!eyeRestAt;
+    r.tab = tabSticky ? tabSticky.state : null;
+    r.peek = !!peek;
     r.auto = {
       mode: settings.autoDetect,
       detected: info && info.detector && info.detectorKey === r.key ? info.detector.state : null,
@@ -1513,6 +1875,17 @@
 
   function onMessage(msg, sender, sendResponse) {
     if (destroyed || !msg || typeof msg !== 'object' || (sender && sender.id !== runtime.id)) return false;
+    if (msg.type === 'fs-hint') {
+      // background：父页面把本 frame 所在的 iframe 设为全屏 / 退出了
+      try {
+        if (!isTop) {
+          fsHintAt = Date.now();
+          setTopFsHint(msg.on === true);
+        }
+      } catch (e) { /* ignore */ }
+      sendResponse({ ok: true });
+      return false;
+    }
     if (msg.type !== 'get-state' && msg.type !== 'command' && msg.type !== 'set-state' && msg.type !== 'osd') return false;
     try {
       if (msg.type === 'get-state') evaluate(false);
@@ -1526,6 +1899,7 @@
         if (msg.command === 'toggle-hdr') toggleHdr();
         else if (msg.command === 'toggle-auto') toggleAuto();
         else if (msg.command === 'forget-video') forgetVideo();
+        else if (msg.command === 'peek') peekCommand();
       } else setState(msg.state);
     } catch (e) { /* 仍然回复，避免调用方重试到别的 frame */ }
     try { sendResponse(snapshot()); } catch (e) { sendResponse({ ok: false }); }
@@ -1599,6 +1973,9 @@
   });
   const onVisibility = guard(function () {
     if (document.hidden) {
+      // 页面隐藏：按住的手势作废，对比结束
+      holdReset();
+      if (peek) peekEnd();
       updateSampler();
       return;
     }
@@ -1672,7 +2049,11 @@
     clearInterval(sampleTimer);
     clearTimeout(evalTimer);
     clearTimeout(osdHideTimer);
-    clearTimeout(osdRemoveTimer);
+    clearTimeout(btnHoldTimer);
+    if (peek) {
+      clearTimeout(peek.timer);
+      peek = null;
+    }
     if (btnRaf) { try { cancelAnimationFrame(btnRaf); } catch (e) { /* ignore */ } }
     try { removeButton(); } catch (e) { /* ignore */ }
     removeBtnStyle();
@@ -1689,6 +2070,7 @@
       window.removeEventListener('popstate', onNavigate);
       window.removeEventListener('pageshow', onPageShow);
       window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('resize', onFsResize);
       if (navApi) navApi.removeEventListener('navigatesuccess', onNavigate);
     } catch (e) { /* ignore */ }
     const list = Array.from(videos);

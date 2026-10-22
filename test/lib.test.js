@@ -2350,6 +2350,131 @@ test('ui-kit：signed、sliderFill、setText / setNum 只在变了时写', () =>
   assert.equal(input.value, '6');
 });
 
+// ---------- 1.3 P3：按住对比、仅全屏、本标签页沿用 ----------
+
+// 去掉注释后的源码；fnBody 取出顶层缩进为 2 的函数（或 const x = guard(function) 定义）的整段
+function srcOf(file) {
+  return fs.readFileSync(path.join(ROOT, file), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+function fnBody(src, name) {
+  const m = new RegExp('\\n {2}(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n {2}\\}').exec(src) ||
+    new RegExp('\\n {2}const ' + name + ' = guard\\(function \\([^)]*\\) \\{[\\s\\S]*?\\n {2}\\}\\);').exec(src);
+  assert.ok(m, '找到 ' + name);
+  return m[0];
+}
+
+test('content.js 按住对比：不调用 setManual、不写视频记忆和护眼标记，结束时回到决策状态', () => {
+  const src = srcOf('content.js');
+  for (const name of ['peekGuard', 'peekStart', 'peekClear', 'peekEnd', 'peekCommand', 'holdBegin', 'onHoldDue', 'holdUp', 'holdReset']) {
+    const body = fnBody(src, name);
+    assert.ok(!/\bsetManual\(|\bsaveRule\(|\bVIDEO_PREFIX\b|\bEYE_REST_KEY\b|storage\.local/.test(body), name + ' 不写状态');
+  }
+  // 对比用 raw 加滤镜（「只关 HDR」不替换），只在主视频、key、决策都没变时生效
+  assert.ok(/applyState\(v, peek\.state, true\)/.test(fnBody(src, 'peekStart')));
+  const ev = fnBody(src, 'evaluate');
+  assert.ok(/v === primary && key === peek\.key && want === peek\.base/.test(ev), 'evaluate 检查对比的前提');
+  assert.ok(/info\.eff = eff;/.test(ev) && /const eff = want === 'off'/.test(ev), 'eff 仍按决策状态');
+  // 拒绝的四种情况
+  const guardSrc = fnBody(src, 'peekGuard');
+  for (const k of ['content.noVideo', 'content.drm', 'content.contested', 'content.peekHdrOnly']) assert.ok(guardSrc.includes("'" + k + "'"), k);
+  // 页面冲掉滤镜后补回不做「只关 HDR」的替换
+  assert.ok(/applyState\(v, 'off', true\)/.test(fnBody(src, 'onStyleMutations')));
+  // 命令 peek 转给 peekCommand；对比标记不受「屏幕提示」开关控制，盖在视频上不用过渡
+  assert.ok(/msg\.command === 'peek'\) peekCommand\(\)/.test(src));
+  assert.ok(/k !== 'peek' && !settings\.osd/.test(fnBody(src, 'showOsd')));
+  // 所有提示都盖在视频上：样式里没有过渡、动画、滤镜和变换，隐藏时立即移除（不做透明度动画）
+  const osdCss = (src.match(/const OSD_CSS = [\s\S]*?';\n/) || [''])[0] + (src.match(/const OSD_INNER_CSS = [\s\S]*?';\n/) || [''])[0];
+  assert.ok(osdCss.includes('transition:none !important;'), 'OSD_CSS 关闭过渡');
+  assert.ok(!/transition:(?!none)|animation|filter\s*:|transform\s*:/.test(osdCss), 'OSD 样式不用过渡、动画、滤镜和变换');
+  const hide = fnBody(src, 'hideOsd');
+  assert.ok(/removeOsd\(\)/.test(hide) && !/opacity|setTimeout/.test(hide), 'hideOsd 立即移除');
+  // 按钮：指针和回车两条路径，按住后吞掉 click，触屏长按不弹菜单
+  for (const ev2 of ['pointerdown', 'pointerup', 'pointercancel', 'lostpointercapture', 'contextmenu']) {
+    assert.ok(src.includes("b.addEventListener('" + ev2 + "'"), ev2);
+  }
+  assert.ok(/if \(swallowClick\) \{/.test(fnBody(src, 'onBtnClick')));
+  assert.ok(/holdBegin\('key'\)/.test(fnBody(src, 'onBtnKeyDown')) && /=== 'tap'\) pressButton\(\)/.test(fnBody(src, 'onBtnKeyUp')));
+  // 能走到切换和对比的处理函数都只认用户的输入
+  for (const fn of ['onBtnPointerDown', 'onBtnPointerUp', 'onBtnKeyDown', 'onBtnKeyUp', 'onBtnClick']) {
+    assert.ok(/e\.isTrusted/.test(fnBody(src, fn)), fn + ' 检查 isTrusted');
+  }
+  const click = fnBody(src, 'onBtnClick');
+  const trusted = click.indexOf('if (!e.isTrusted) return;');
+  assert.ok(trusted >= 0 && trusted < click.indexOf('if (swallowClick)'), 'onBtnClick 先查 isTrusted 再吞 click');
+  // 开始对比前求值时按钮可能被换掉：手势已作废就不开始
+  assert.ok(/btnHold\.held && btnHoldSrc === source/.test(fnBody(src, 'peekStart')));
+});
+
+test('content.js 仅全屏：主视频按全屏判定，fs-hint 与 topFs，白底检测在「仅全屏」开着时也采样', () => {
+  const src = srcOf('content.js');
+  assert.ok(/fullscreen: v === primary && isFullscreenFor\(v\)/.test(fnBody(src, 'decideFor')));
+  const fs1 = fnBody(src, 'isFullscreenFor');
+  assert.ok(/containsDeep\(fsElNow, v\)/.test(fs1) && /topFsHint && frameFillsScreen\(\)/.test(fs1) && /settings\.fullscreenWeb/.test(fs1));
+  assert.ok(/base\.reason === 'fullscreen'/.test(fnBody(src, 'wantSampling')));
+  assert.ok(/msg\.type === 'fs-hint'/.test(src), 'onMessage 接受 fs-hint');
+  assert.ok(/res\.topFs/.test(fnBody(src, 'onReply')), 'onReply 处理 topFs');
+  assert.ok(/r\.fsFrame = fsFrameNow\(\)/.test(fnBody(src, 'buildReport')), '顶层报告带 fsFrame');
+  assert.ok(/r\.fsFrame/.test(fnBody(src, 'report')), '报告签名含 fsFrame');
+  // B 站网页全屏
+  assert.ok(/webFull: '\.bpx-player-container\[data-screen="web"\]'/.test(src));
+  const bg = srcOf('background.js');
+  assert.ok(/fsFrame: !!msg\.fsFrame/.test(bg), 'sanitizeReport 保留 fsFrame');
+  assert.ok(/type: 'fs-hint', on: on/.test(bg) && /L\.fsHintTarget\(/.test(bg), 'background 推送 fs-hint');
+  assert.ok(/if \(frameId > 0\) reply\.topFs = frameId === fsTarget;/.test(bg), '只给子 frame 回 topFs');
+});
+
+test('content.js 本标签页沿用：decide 传 tab，清除记忆一并取消，自动沿用不写视频记忆', () => {
+  const src = srcOf('content.js');
+  const d = fnBody(src, 'decideFor');
+  assert.ok(/const tab = owner && tabSticky \? tabSticky\.state : null;/.test(d) && /tab: tab,/.test(d));
+  assert.ok(/if \(!tab\) return null;/.test(d), '有沿用时不等记忆读出来');
+  const sm = fnBody(src, 'setManual');
+  assert.ok(/L\.tabOffer\(lastManual, key, state, tabSticky\)/.test(sm) && /settings\.osd && L\.tabOffer/.test(sm));
+  assert.ok(/tabSticky = null;/.test(fnBody(src, 'forgetVideo')) && /'content\.forgotTab'/.test(fnBody(src, 'forgetVideo')));
+  const st = fnBody(src, 'setTabSticky');
+  assert.ok(!/\bsaveRule\(|\bVIDEO_PREFIX\b|storage\.local/.test(st), 'setTabSticky 不写存储');
+  assert.ok(/e\.isTrusted/.test(fnBody(src, 'onOfferClick')), '提议按钮只认真实点击');
+  const pointer = fnBody(src, 'onOsdPointer');
+  assert.ok(/stopPropagation\(\)/.test(pointer));
+  for (const t of ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) assert.ok(src.includes("'" + t + "'"), t);
+  const snap = fnBody(src, 'snapshot');
+  assert.ok(/r\.tab = tabSticky \? tabSticky\.state : null;/.test(snap) && /r\.peek = !!peek;/.test(snap));
+});
+
+test('弹窗 1.3：仅全屏的第三项、网页全屏复选框、网站规则 fullscreen、沿用时可以清除记忆', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
+  assert.ok(/name="default-state" value="fullscreen"><span data-i18n="rules\.defaultFullscreen">/.test(html));
+  assert.ok(/<input type="checkbox" id="fullscreen-web"><span data-i18n="rules\.fullscreenWeb">/.test(html));
+  assert.ok(/<option value="fullscreen" data-i18n="site\.fullscreen">/.test(html));
+  const js = srcOf('popup.js');
+  assert.ok(/el\.value === 'fullscreen'\) s\.sites\[tabHost\] = el\.value/.test(js));
+  assert.ok(/s\.fullscreenWeb = el\.checked/.test(js));
+  assert.ok(/forget\.disabled = !\(st\.manual \|\| st\.saved \|\| st\.tab\)/.test(js));
+});
+
+test('i18n 1.3 P3：开关类选项的中文动词写完整，peek 命令没有预设快捷键', () => {
+  const I = require('../i18n.js');
+  for (const k of ['site.on', 'site.off', 'site.fullscreen', 'rules.defaultOn', 'rules.defaultOff']) {
+    assert.ok(!/(^|[^启闭])[开关] HDR/.test(I.DICT.zh[k]), k + '：' + I.DICT.zh[k]);
+  }
+  // 全部中文文字：「开」「关」不单独作动词。名词「开关」、离开、无关、功能名「只关 HDR」除外；
+  // 单独的「开」「关」或「：开」「：关」这类状态词也除外
+  for (const [k, v] of Object.entries(I.DICT.zh)) {
+    const s = v.replace(/开关|离开|无关|只关 HDR/g, '');
+    if (/^[开关]$/.test(s)) continue;
+    const bad = s.replace(/：[开关](?=$|[（，])/g, '').replace(/HDR：[开关](?=（)/g, '');
+    assert.ok(!/(^|[^启闭打])[开关](?![启闭心])/.test(bad), k + '：' + v);
+  }
+  for (const lang of ['zh', 'en']) {
+    assert.ok(I.t(lang, 'content.peek', { state: 'SDR' }).includes('SDR'));
+    const timed = I.t(lang, 'content.peekTimed', { state: 'HDR', seconds: 5 });
+    assert.ok(timed.includes('HDR') && timed.includes('5'), timed);
+  }
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+  assert.ok(manifest.commands.peek && !manifest.commands.peek.suggested_key);
+  assert.equal(manifest.commands.peek.description, '__MSG_cmdPeek__');
+});
+
 // ---------- 运行 ----------
 
 let passed = 0;
