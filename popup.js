@@ -26,6 +26,9 @@
   const NV_SLIDERS = ['peak', 'middleGrey', 'contrast', 'saturation'];
   const PROFILES_KEY = 'profiles'; // background 写：{v, list, activeId}
   const PROFILE_UNDO_KEY = 'profileUndo'; // background 写（storage.session）：10 分钟内可以撤销的配置档切换
+  const NV_LOG_KEY = 'nvLog'; // background 写（storage.session）：NVIDIA 修改记录
+  const NV_LAST_MS = 10000; // 修改后「上一次：… 撤销」显示这么久
+  const UPDATE_KEY = 'updateState'; // background 写：更新检查的结果
   // 文字由脚本随状态改写的元素：切换语言时不按 data-i18n 覆盖
   const DYNAMIC_TEXT = new Set(['video-message', 'nv-message', 'sdr-read', 'nv-delete']);
 
@@ -81,6 +84,10 @@
   let pfDeleteArmed = null; // {id, timer}
   let pfOverwriteName = null; // 已提示过「将覆盖」的同名配置档，再保存一次才覆盖
   let siteListSig = '';
+
+  let nvLastEntry = null; // 修改记录里最新的一条可撤销的修改
+  let nvLastTimer = 0;
+  let upView = null; // background 回复的更新信息：{dev, enabled, version, notice}
 
   function noop() {}
 
@@ -399,6 +406,8 @@
     renderTheme();
     renderNvPresets();
     renderProfiles();
+    renderUpdate();
+    renderNvLast();
     renderFoot();
     renderShortcuts();
     if (current) renderState(current);
@@ -417,7 +426,7 @@
     setText('foot-auto-key', key ? t('foot.autoKey', { key: key }) : '');
     let v = '';
     try { v = 'v' + chrome.runtime.getManifest().version; } catch (e) { v = ''; }
-    setText('foot-version', v);
+    setText('foot-version', v).classList.toggle('is-new', !!(upView && upView.notice));
   }
 
   function renderHdrOnlyStatus() {
@@ -587,7 +596,9 @@
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'session' && changes[PROFILE_UNDO_KEY]) loadProfiles();
+        if (area === 'session' && changes[NV_LOG_KEY]) nvLastAccept(changes[NV_LOG_KEY].newValue);
         if (area !== 'local') return;
+        if (changes[UPDATE_KEY]) loadUpdate();
         if (changes[PROFILES_KEY]) loadProfiles();
         if (changes[NV_LAST_PRESET_KEY]) nvLastPresetId = changes[NV_LAST_PRESET_KEY].newValue || null;
         if (changes[SDR_LAST_KEY]) sdrLastWhite = changes[SDR_LAST_KEY].newValue == null ? null : changes[SDR_LAST_KEY].newValue;
@@ -598,9 +609,11 @@
           if (current) renderState(current);
         }
         if (changes.settings) {
+          const prevCheck = stored.updateCheck;
           stored = L.mergeSettings(changes.settings.newValue);
           rebase();
           sdrSyncPolling();
+          if (stored.updateCheck !== prevCheck) loadUpdate(); // 关掉检查时不再提醒
         }
       });
     } catch (e) { /* ignore */ }
@@ -1178,6 +1191,119 @@
     }, NV_DEBOUNCE_MS));
   }
 
+  // ---------- 更新提醒（只由 background 检查和写 updateState：这里只显示、发 update 消息） ----------
+
+  function updateMsg(op, extra) {
+    return call(() => chrome.runtime.sendMessage(Object.assign({ type: 'update', op: op }, extra))).then(
+      (r) => (r && r.ok === true ? r : null), () => null);
+  }
+
+  async function loadUpdate() {
+    const r = await updateMsg('state');
+    if (r) upView = r;
+    renderUpdate();
+    renderFoot();
+  }
+
+  // 规则页签顶部的提醒卡、页签上的小点；「检查新版本」只在解压安装时出现
+  function renderUpdate() {
+    const n = upView && upView.notice;
+    $('up-card').hidden = !n;
+    $('tab-rules').classList.toggle('has-dot', !!n);
+    if (n) {
+      const title = t('update.title', { version: n.version });
+      setText('up-title', title);
+      $('tab-rules').setAttribute('aria-description', title);
+      $('up-zip').hidden = !n.zip;
+    } else {
+      $('tab-rules').removeAttribute('aria-description');
+    }
+    $('update-check-row').hidden = !(upView && upView.dev);
+    setChecked('update-check', settings.updateCheck);
+  }
+
+  // 跳过、7 天内不提醒：卡片先收起，background 改完回复新的状态（图标的小点由它去掉）
+  async function dismissUpdate(op) {
+    const n = upView && upView.notice;
+    if (!n) return;
+    upView = Object.assign({}, upView, { notice: null });
+    renderUpdate();
+    renderFoot();
+    $('tab-rules').focus();
+    const r = await updateMsg(op, { version: n.version });
+    if (r) upView = r;
+    renderUpdate();
+    renderFoot();
+  }
+
+  function openUrl(url) {
+    if (url) call(() => chrome.tabs.create({ url: url })).catch(noop);
+  }
+
+  function bindUpdate() {
+    $('up-backup').addEventListener('click', () => openOptions('#export'));
+    $('up-zip').addEventListener('click', () => openUrl(upView && upView.notice && upView.notice.zip));
+    $('up-release').addEventListener('click', () => openUrl(upView && upView.notice && upView.notice.url));
+    $('up-skip').addEventListener('click', () => dismissUpdate('skip'));
+    $('up-snooze').addEventListener('click', () => dismissUpdate('snooze'));
+    onChange('update-check', (el) => save((s) => { s.updateCheck = el.checked; }));
+    $('foot-diag').addEventListener('click', () => {
+      openUrl(chrome.runtime.getURL('diag.html' + (tabId !== null ? '?tab=' + tabId : '')));
+    });
+  }
+
+  // ---------- NVIDIA 修改记录：「上一次」和撤销 ----------
+
+  // 修改记录（background 写在 storage.session）里最新的一条修改（只关 HDR 的借用不算）：10 秒内显示「上一次：…」和撤销。
+  // 最新的是撤销、失败的或已经撤销过的修改时不显示
+  function nvLastAccept(raw) {
+    const list = L.nvNormLog(raw).list;
+    let e = null;
+    for (let i = list.length - 1; i >= 0 && !e; i--) if (list[i].source !== 'lease') e = list[i];
+    nvLastEntry = e && e.ok && e.undoable && !e.undone && e.source !== 'undo' ? e : null;
+    renderNvLast();
+  }
+
+  async function loadNvLast() {
+    const r = await call(() => chrome.storage.session.get(NV_LOG_KEY)).catch(() => null);
+    nvLastAccept(r && r[NV_LOG_KEY]);
+  }
+
+  function renderNvLast() {
+    clearTimeout(nvLastTimer);
+    const e = nvLastEntry;
+    const left = e ? e.at + NV_LAST_MS - Date.now() : 0;
+    const change = left > 0 ? L.nvChangeText(e, lang) : '';
+    $('nv-last').hidden = !change;
+    if (!change) return;
+    // 自己（弹窗）刚改的不写来源
+    setText('nv-last-text', e.source === 'popup' ? t('nv.last', { change: change }) : t('nv.undoLast', { change: change, source: t('nv.source.' + e.source) }));
+    nvLastTimer = setTimeout(renderNvLast, left + 50);
+  }
+
+  function undoResultText(res) {
+    if (res && res.ok === true) {
+      const tg = res.target || {};
+      return t('nv.undoDone', { change: L.nvChangeText(res.diff, lang) || L.nvChangeText({ before: tg.after, after: tg.before }, lang) });
+    }
+    if (res && res.code === 'none') return t('nv.undoNone');
+    if (res && res.empty && !(res.unavailable && res.unavailable.length) && res.skipped && res.skipped.length) {
+      return t('nv.undoSkipped', { fields: res.skipped.map((f) => t('nv.field.' + f)).join(lang === 'en' ? ', ' : '、') });
+    }
+    return t('nv.undoFailed', { err: L.nvErrorText(res && res.error, lang) });
+  }
+
+  // 撤销走 background（nv-op undo，和快捷键同一个服务）：先把自己端口上的修改发完，期间暂停自己的写入
+  async function nvUndoLast() {
+    const btn = $('nv-undo');
+    btn.disabled = true;
+    const res = await nv.exclusive(() => nvOp({ op: 'undo' }));
+    btn.disabled = false;
+    nvMessage(undoResultText(res), !(res && (res.ok === true || res.code === 'none')));
+    await loadNvLast();
+    if ($('nv-last').hidden) $('tab-nv').focus();
+  }
+
   // 拖回起点时 Chrome 不发 change，松手时照样提交一次
   function nvEndDrag() {
     const d = nv.dragEnd();
@@ -1388,6 +1514,7 @@
         $('nv-save').focus();
       }
     });
+    $('nv-undo').addEventListener('click', nvUndoLast);
     $('nv-install').addEventListener('click', (e) => {
       e.preventDefault();
       call(() => chrome.tabs.create({ url: e.currentTarget.href })).catch(noop);
@@ -1484,7 +1611,10 @@
     bind();
     nvBind();
     bindProfiles();
+    bindUpdate();
     loadProfiles();
+    loadUpdate();
+    loadNvLast();
     // 快捷键切换预设失败时当前页面显示不了提示（chrome:// 页面等）：在这里补一次，只显示一次
     if (hotkeyError) {
       call(() => chrome.storage.local.remove(NV_HOTKEY_ERROR_KEY)).catch(noop);

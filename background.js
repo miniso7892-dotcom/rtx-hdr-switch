@@ -4,6 +4,7 @@
  * 汇总各标签页上报的观看时间做「连续观看提醒」；
  * 通过本地组件（native messaging）读写 NVIDIA 全局设置：定时切换预设、「下一个预设」快捷键、撤销、弹窗兜底；
  * NVIDIA 写入统一经 nvWrite（互斥 + 修改记录）。settings 只由这里写（settingsTxn），其他页面提交补丁。
+ * 解压安装时每天最多查一次 GitHub 上的新版本（图标加小点提醒）；给诊断页拼快照。
  */
 'use strict';
 
@@ -75,6 +76,13 @@ const PANEL_FRAMES_KEY = 'panelFrames';
 const PANEL_FRAMES_MAX = 8; // 每个标签页最多登记几个面板 iframe（多了先丢最早的）
 const PANEL_CLAIM_MS = 30000; // 面板认领 nonce 后这么久内要等到内容脚本来登记
 const PANEL_NONCE_RE = /^[0-9a-f]{32}$/;
+// 更新检查（只对解压安装）：闹钟每 180 分钟叫醒一次，真正请求由 L.updateDue 决定（每天最多一次，退避期内不请求）
+const UPDATE_KEY = 'updateState';
+const UPDATE_ALARM = 'update-check';
+const UPDATE_API = 'https://api.github.com/repos/miniso7892-dotcom/rtx-hdr-switch/releases/latest';
+const UPDATE_PERIOD_MIN = 180;
+const UPDATE_DELAY_MIN = 2; // 安装、浏览器启动后先等一会儿
+const UPDATE_TIMEOUT_MS = 15000;
 // 角标：HDR 用主题色，SDR 黑底白字；DRM 视频扩展管不了，不显示 HDR/SDR，免得和实际情况相反
 const BADGE_SDR = { text: 'SDR', color: '#0A0A0A', textColor: '#FAFAFA' };
 const BADGE_DRM = { text: 'DRM', color: '#6B6B6B', textColor: '#FFFFFF' };
@@ -423,14 +431,19 @@ function refreshAllBadges() {
   for (const [tabId, t] of tabState) refreshBadge(tabId, t).catch(noop);
 }
 
-// 工具栏图标中间那道分割线用主题色（浏览器重启后会回到 manifest 的静态图标，启动时再画一次）
-function applyIcon(accent) {
+// 工具栏图标中间那道分割线用主题色（浏览器重启后会回到 manifest 的静态图标，启动时再画一次）；
+// 有新版本要提醒时右上角加一个小点（updateDot）。setIcon 画的图标比 service worker 活得久，
+// 所以 SW 重启后 updateDot 回到 null（不知道），第一次画图标前按 updateView 重新算
+let updateDot = null;
+
+async function applyIcon(accent) {
   const icon = self.RtxHdrIcon;
-  if (!icon || typeof icon.imageDataSet !== 'function') return Promise.resolve();
+  if (!icon || typeof icon.imageDataSet !== 'function') return;
+  if (updateDot === null) updateDot = await updateView().then((v) => !!v.notice, () => false);
   let imageData = null;
-  try { imageData = icon.imageDataSet(L.normAccent(accent)); } catch (e) { imageData = null; }
-  if (!imageData) return Promise.resolve();
-  return call(() => chrome.action.setIcon({ imageData: imageData })).catch(noop);
+  try { imageData = icon.imageDataSet(L.normAccent(accent), { dot: updateDot }); } catch (e) { imageData = null; }
+  if (!imageData) return;
+  await call(() => chrome.action.setIcon({ imageData: imageData })).catch(noop);
 }
 
 // 界面语言：设置里的（自动时按浏览器界面语言）
@@ -545,6 +558,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
     // 网站绑定或预设列表变了：网站预设重新判断（绑定被删、预设被删时恢复）
     if (JSON.stringify(prev.nv.sitePresets) !== JSON.stringify(settingsCache.nv.sitePresets) ||
       JSON.stringify(prev.nv.presets) !== JSON.stringify(settingsCache.nv.presets)) siteSchedule(true);
+    // 关掉检查：闹钟清掉、小点去掉；打开：排上闹钟
+    if (prev.updateCheck !== settingsCache.updateCheck) updateSync().catch(noop);
     if (prev.hdrOnly !== settingsCache.hdrOnly) {
       hoCaps = null; // 重新探测本地组件
       hoRetryAt = 0;
@@ -562,6 +577,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
       }).catch(noop);
     }
   }
+  if (changes[UPDATE_KEY]) updateRefreshDot().catch(noop);
   if (changes[L.EYE_REST_KEY]) {
     // 内容脚本在护眼 SDR 期间手动切回 HDR 时会删掉标记
     const on = !!L.eyeRestAt(changes[L.EYE_REST_KEY].newValue);
@@ -1477,11 +1493,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm && alarm.name === NV_ALARM) nvScheduleCheck();
   else if (alarm && alarm.name === NV_FOLLOW_ALARM) nvFollowCheck();
   else if (alarm && alarm.name === NV_SITE_ALARM) siteEvaluate();
+  else if (alarm && alarm.name === UPDATE_ALARM) updateRun(false).then(updateRefreshDot).catch(noop);
 });
 
-// 浏览器启动：主题色图标、跟随 SDR 的闹钟、「只关 HDR」的状态（上次的借用在浏览器退出时已由本地组件还掉）
+// 浏览器启动：更新检查的闹钟和图标小点、主题色图标、跟随 SDR 的闹钟、「只关 HDR」的状态（上次的借用在浏览器退出时已由本地组件还掉）
 async function onBrowserStart() {
   const s = await getSettings();
+  await updateSync().catch(noop);
   await applyIcon(s.ui.accent);
   await nvSyncFollowAlarm(s);
   hoStatusSig = '';
@@ -1971,6 +1989,198 @@ async function nvLogFromPage(msg, page) {
   return { ok: true, logId: logId };
 }
 
+// ---------- 更新检查 ----------
+// 只对解压安装（installType === 'development'）检查：商店安装会自动更新，其他安装方式不检查。
+// 向 GitHub 的 latest release 发不带 Cookie 的 GET（带 ETag），结果按 L.updateAfter 存进 updateState；
+// 有可提醒的新版本时工具栏图标右上角加一个小点
+
+let installTypeLoad = null;
+let updateQueue = Promise.resolve();
+let updateRunning = null;
+
+// management.getSelf 不需要 management 权限；结果在 service worker 的生命周期内不变
+function installType() {
+  if (!installTypeLoad) {
+    installTypeLoad = call(() => chrome.management.getSelf())
+      .then((info) => (info && typeof info.installType === 'string' ? info.installType : ''), () => '');
+  }
+  return installTypeLoad;
+}
+
+async function updateEnabled() {
+  const [s, type] = await Promise.all([getSettings(), installType()]);
+  return s.updateCheck && type === 'development';
+}
+
+function updateRead() {
+  return call(() => chrome.storage.local.get(UPDATE_KEY)).then((r) => L.normUpdateState(r && r[UPDATE_KEY]), () => L.normUpdateState(null));
+}
+
+// updateState 的读改写排队执行（检查结果、跳过、7 天内不提醒互相不覆盖）。fn(当前) → 新状态或 null（不改）
+function updateTxn(fn) {
+  const run = updateQueue.then(async () => {
+    const cur = await updateRead();
+    const next = fn(cur);
+    if (next && JSON.stringify(next) !== JSON.stringify(cur)) await chrome.storage.local.set({ [UPDATE_KEY]: next });
+    return next || cur;
+  });
+  updateQueue = run.then(noop, noop);
+  return run;
+}
+
+// → {status, etag, headers, json?} 或 {error:'offline'|'timeout'}，永远不 reject
+async function updateFetch(etag) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), UPDATE_TIMEOUT_MS);
+  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (etag) headers['If-None-Match'] = etag;
+  try {
+    const res = await fetch(UPDATE_API, {
+      method: 'GET', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', headers: headers, signal: ctl.signal
+    });
+    const h = (k) => res.headers.get(k);
+    const out = { status: res.status, etag: h('ETag'), headers: { remaining: h('X-RateLimit-Remaining'), reset: h('X-RateLimit-Reset'), retryAfter: h('Retry-After') } };
+    if (res.status === 200) {
+      try {
+        out.json = await res.json();
+      } catch (e) {
+        if (ctl.signal.aborted) throw e;
+        out.json = null; // 不是 JSON：按 invalid 记
+      }
+    }
+    return out;
+  } catch (e) {
+    return { error: ctl.signal.aborted ? 'timeout' : 'offline' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 检查一次（同一时间只跑一个）。force：诊断页的「立即检查」，不等 24 小时；退避期内都不请求。
+// 返回 {ok, code?}：code 为 disabled（没开检查或不是解压安装）、wait（还在退避）、later（还没到 24 小时）
+function updateRun(force) {
+  if (updateRunning) return updateRunning;
+  updateRunning = (async () => {
+    if (!(await updateEnabled())) return { ok: false, code: 'disabled' };
+    const st = await updateRead();
+    const now = Date.now();
+    if (now < st.retryAt) return { ok: false, code: 'wait' };
+    if (!force && !L.updateDue(st, now)) return { ok: true, code: 'later' };
+    const res = await updateFetch(st.etag);
+    const next = await updateTxn((cur) => L.updateAfter(cur, res, Date.now()));
+    return next.lastError ? { ok: false, code: next.lastError.code } : { ok: true };
+  })().catch(() => ({ ok: false, code: 'internal' })).then((r) => {
+    updateRunning = null;
+    return r;
+  });
+  return updateRunning;
+}
+
+// 页面要的更新信息：要不要提醒（notice）、是否解压安装（dev，弹窗据此显示「检查新版本」）
+async function updateView() {
+  const [s, type, state] = await Promise.all([getSettings(), installType(), updateRead()]);
+  const version = chrome.runtime.getManifest().version;
+  const dev = type === 'development';
+  return {
+    ok: true, dev: dev, installType: type, enabled: s.updateCheck, version: version, state: state,
+    notice: dev && s.updateCheck ? L.updateNotice(state, version, Date.now()) : null
+  };
+}
+
+// 图标上的小点跟着 notice 走（跳过、7 天内不提醒、关掉检查后去掉；7 天过了闹钟叫醒时再画上）。
+// 每次都重画：内存里的 updateDot 在 SW 重启后不代表工具栏上实际画着什么
+async function updateRefreshDot() {
+  updateDot = !!(await updateView()).notice;
+  await applyIcon((await getSettings()).ui.accent);
+}
+
+// 设置里开着检查且是解压安装时排上闹钟，否则清掉
+async function updateSync() {
+  if (await updateEnabled()) {
+    const a = await call(() => chrome.alarms.get(UPDATE_ALARM)).catch(() => null);
+    if (!a) await call(() => chrome.alarms.create(UPDATE_ALARM, { delayInMinutes: UPDATE_DELAY_MIN, periodInMinutes: UPDATE_PERIOD_MIN })).catch(noop);
+  } else {
+    await call(() => chrome.alarms.clear(UPDATE_ALARM)).catch(noop);
+  }
+  await updateRefreshDot();
+}
+
+// {type:'update', op:'state'|'check'|'skip'|'snooze', version?} → updateView()（check 另带 result）
+async function updateHandle(msg) {
+  if (msg.op === 'state') return updateView();
+  if (msg.op === 'check') {
+    const result = await updateRun(true);
+    return Object.assign(await updateView(), { result: result });
+  }
+  if (msg.op === 'skip' || msg.op === 'snooze') {
+    if (L.semverCmp(msg.version, msg.version) !== 0) return { ok: false, code: 'bad-request' };
+    await updateTxn((cur) => (msg.op === 'skip' ? L.updateSkip(cur, msg.version) : L.updateSnooze(cur, msg.version, Date.now())));
+    return updateView();
+  }
+  return { ok: false, code: 'bad-request' };
+}
+
+// ---------- 诊断快照 ----------
+// 本地组件的 hello / get / display 原样返回，加上内存里的状态（借用、端口、网站预设）、闹钟、存储用量、
+// 指定标签页各 frame 的报告、修改记录和更新状态。脱敏在诊断页复制时做（L.diagRedact）
+
+async function diagTab(tabId) {
+  if (!validTabId(tabId)) return null;
+  const t = await getTab(tabId);
+  const tab = await call(() => chrome.tabs.get(tabId)).catch(() => null);
+  const best = bestFrame(t);
+  return {
+    id: tabId,
+    url: tab ? tab.url || tab.pendingUrl || '' : '',
+    bestFrameId: best ? best.frameId : null,
+    fsHint: t.fsHint,
+    panels: panelFrames.has(tabId) ? panelFrames.get(tabId).size : 0,
+    frames: t.frames
+  };
+}
+
+async function diagSnapshot(tabId) {
+  const [hello, got, displays] = await Promise.all([hostCall({ cmd: 'hello' }), hostCall({ cmd: 'get' }), hostCall({ cmd: 'display' })]);
+  const [s, all, ses, alarms, localBytes, sessionBytes, tab, update] = await Promise.all([
+    getSettings(),
+    call(() => chrome.storage.local.get(null)).catch(() => ({})),
+    call(() => chrome.storage.session.get(NV_LOG_KEY)).catch(() => ({})),
+    call(() => chrome.alarms.getAll()).catch(() => []),
+    call(() => chrome.storage.local.getBytesInUse(null)).catch(() => null),
+    call(() => chrome.storage.session.getBytesInUse(null)).catch(() => null),
+    diagTab(tabId).catch(() => null),
+    updateView()
+  ]);
+  const profiles = L.normProfiles(all[PROFILES_KEY]);
+  return {
+    ok: true,
+    at: Date.now(),
+    host: {
+      hello: hello,
+      check: L.nvHostCheck(hello),
+      port: { open: !!hostConn, waiting: hostConn ? hostConn.waiters.length : 0, fails: hostFails, retryAt: hostRetryAt }
+    },
+    state: got,
+    displays: displays,
+    hdrOnly: {
+      enabled: s.hdrOnly, status: all[HDR_ONLY_KEY] || null, lease: hoLeaseInfo(),
+      caps: hoCaps, capsError: hoCapsError, retryAt: hoRetryAt, lastError: hoLastError, suppress: hoSuppress
+    },
+    site: { record: all[NV_SITE_KEY] || null, fail: siteFail, pending: !!(siteTimer || siteRunning) },
+    schedule: { phase: all[NV_PHASE_KEY] || null, lastPresetId: all[NV_LAST_PRESET_KEY] || null, sdrWhite: all[SDR_LAST_KEY] == null ? null : all[SDR_LAST_KEY] },
+    alarms: alarms || [],
+    storage: {
+      local: localBytes, session: sessionBytes,
+      videos: Object.keys(all).filter((k) => k.indexOf(L.VIDEO_PREFIX) === 0).length, maxVideos: L.MAX_VIDEO_ENTRIES
+    },
+    settings: s,
+    profiles: { count: profiles.list.length, activeId: profiles.activeId },
+    tab: tab,
+    log: L.nvNormLog(ses && ses[NV_LOG_KEY]).list,
+    update: { installType: update.installType, enabled: update.enabled, version: update.version, notice: update.notice, state: update.state }
+  };
+}
+
 // ---------- 消息 ----------
 
 // 扩展自己的页面 → 'popup' | 'options' | 'diag' | 'panel'；其他（内容脚本、网页）→ ''。
@@ -2079,6 +2289,20 @@ function onRuntimeMessage(msg, sender, sendResponse) {
 
   if (msg.type === 'backup' && msg.op === 'import' && page && page !== 'panel') {
     backupImport(msg.data).then(sendResponse, (e) => sendResponse({ ok: false, code: 'internal', message: String((e && e.message) || e) }));
+    return true;
+  }
+
+  if (msg.type === 'update' && page && page !== 'panel') {
+    updateHandle(msg).then(sendResponse, (e) => sendResponse(internalError(e)));
+    return true;
+  }
+
+  if (msg.type === 'diag' && msg.op === 'snapshot' && page && page !== 'panel') {
+    if (msg.tabId !== undefined && msg.tabId !== null && !validTabId(msg.tabId)) {
+      sendResponse({ ok: false, code: 'bad-request' });
+      return false;
+    }
+    diagSnapshot(msg.tabId).then(sendResponse, (e) => sendResponse(internalError(e)));
     return true;
   }
 

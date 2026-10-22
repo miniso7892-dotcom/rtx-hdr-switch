@@ -38,7 +38,11 @@ body { min-height: 100vh; background: var(--paper); color: var(--ink); font: 15p
 
 :focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 
-.top { display: flex; align-items: center; height: 56px; padding: 0 24px; background: var(--bar); color: var(--bar-fg); }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 56px; padding: 0 24px; background: var(--bar); color: var(--bar-fg); }
+
+.top-link { color: var(--bar-fg); font-weight: 700; text-underline-offset: 3px; }
+
+.top :focus-visible { outline-color: var(--accent-fg); }
 
 .brand { display: flex; align-items: center; gap: 10px; }
 
@@ -121,3 +125,45 @@ body { min-height: 100vh; background: var(--paper); color: var(--ink); font: 15p
   color: var(--ink);
   font: 700 15px var(--f-cjk);
 }
+
+/* ---------- 诊断页（diag.html） ---------- */
+
+.wrap-wide { max-width: 880px; }
+
+.stack { display: flex; flex-direction: column; gap: 20px; }
+
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+
+.check-line { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; cursor: pointer; }
+
+.check-line input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+
+.card pre {
+  align-self: stretch;
+  max-height: 360px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 2px solid var(--rule);
+  font: 500 12px/1.5 Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.warn { color: var(--warn); }
+
+.log { align-self: stretch; list-style: none; margin: 0; padding: 0; font-size: 13px; }
+
+.log li { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 6px 0; border-top: 2px solid var(--rule); }
+
+.log li:last-child { border-bottom: 2px solid var(--rule); }
+
+.log .time { font: 700 12px/1.6 Consolas, "Courier New", monospace; color: var(--muted); }
+
+.log .src { font-weight: 800; }
+
+.log .lbl { color: var(--muted); }
+
+.log .undone .chg { text-decoration: line-through; }
+
+.log .err { color: var(--warn); font-weight: 700; }

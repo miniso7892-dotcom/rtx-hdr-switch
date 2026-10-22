@@ -63,6 +63,13 @@
     check('imageDataSet 只有 16/32', Object.keys(set).join(',') === '16,32', Object.keys(set).join(','));
     check('imageDataSet 尺寸', set[16].width === 16 && set[32].width === 32);
     rgbIs('imageDataSet 用传入的主题色', set[32], 15, 16, [0, 255, 0]);
+    const dotted = I.imageDataSet('#0f0', { dot: true });
+    rgbIs('dot：右上角主题色小点（32）', dotted[32], 25, 7, [0, 255, 0]);
+    rgbIs('dot：右上角主题色小点（16）', dotted[16], 12, 3, [0, 255, 0]);
+    rgbIs('dot：小点外圈是底色（压住屏幕边框）', dotted[32], 19, 8, BG);
+    rgbIs('没有 dot 时这里是屏幕边框', set[32], 19, 8, FG);
+    rgbIs('dot：分隔条不受影响', dotted[32], 15, 16, [0, 255, 0]);
+    rgbIs('没有 dot 时右上角是屏幕边框', set[32], 25, 7, FG);
     return out;
   }
 

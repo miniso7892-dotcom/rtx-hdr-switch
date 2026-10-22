@@ -2214,6 +2214,124 @@
     return { version: l.version, url: url, zip: releaseUrl(l.zip) };
   }
 
+  const UPDATE_SNOOZE_MS = 7 * 24 * HOUR_MS;
+  const UPDATE_ERRORS = ['offline', 'timeout', 'rate', 'http', 'invalid'];
+
+  function updateTime(v) {
+    return typeof v === 'number' && isFinite(v) && v > 0 ? v : 0;
+  }
+
+  function updateVersion(v) {
+    return typeof v === 'string' && v.length <= 40 && parseSemver(v) ? v : null;
+  }
+
+  // 存下的 latest（parseRelease 的结果）：版本号不合法或发布页不在本仓库时作废
+  function normLatest(l) {
+    if (!isObj(l) || !updateVersion(l.version)) return null;
+    const url = releaseUrl(l.url);
+    if (!url) return null;
+    return {
+      version: l.version,
+      tag: typeof l.tag === 'string' ? l.tag.slice(0, 40) : l.version,
+      url: url,
+      zip: releaseUrl(l.zip),
+      digest: typeof l.digest === 'string' && /^sha256:[0-9a-f]{64}$/.test(l.digest) ? l.digest : null,
+      publishedAt: typeof l.publishedAt === 'string' ? l.publishedAt.slice(0, 40) : '',
+      name: typeof l.name === 'string' ? cut(l.name, 80) : ''
+    };
+  }
+
+  /**
+   * storage.local 的 updateState → {v:1, checkedAt, etag, latest, skipped, snoozeUntil, snoozeVersion, fails, retryAt, lastError}
+   * （新对象，坏字段换成默认值）。lastError：{code: UPDATE_ERRORS 之一, status?, at}
+   */
+  function normUpdateState(raw) {
+    const r = isObj(raw) ? raw : {};
+    const e = isObj(r.lastError) && UPDATE_ERRORS.indexOf(r.lastError.code) >= 0 ? r.lastError : null;
+    let lastError = null;
+    if (e) {
+      lastError = { code: e.code, at: updateTime(e.at) };
+      if (Number.isInteger(e.status) && e.status > 0 && e.status < 1000) lastError.status = e.status;
+    }
+    return {
+      v: 1,
+      checkedAt: updateTime(r.checkedAt),
+      etag: typeof r.etag === 'string' && r.etag && r.etag.length <= 200 ? r.etag : null,
+      latest: normLatest(r.latest),
+      skipped: updateVersion(r.skipped),
+      snoozeUntil: updateTime(r.snoozeUntil),
+      snoozeVersion: updateVersion(r.snoozeVersion),
+      fails: Number.isInteger(r.fails) && r.fails > 0 ? Math.min(r.fails, 100) : 0,
+      retryAt: updateTime(r.retryAt),
+      lastError: lastError
+    };
+  }
+
+  /**
+   * 一次检查的结果 → 新的 updateState（不修改输入）。
+   * res：{status, etag?, json?, headers?: {remaining, reset, retryAfter}}，或请求没完成时 {error:'offline'|'timeout'}。
+   * 200：parseRelease 通过才换 latest 和 ETag，认不出来记 invalid（同样等 24 小时再查）；304：latest 不变；404：还没有发布版；
+   * 403 / 429：限流，按 updateBackoff 退避；5xx：退避 3 → 6 → 12 → 24 小时；其他状态码记 http，等 24 小时；
+   * 离线、超时：只记错误，不改检查时间，下一轮闹钟再试
+   */
+  function updateAfter(state, res, now) {
+    const s = normUpdateState(state);
+    const r = isObj(res) ? res : { error: 'offline' };
+    const fail = function (code, status) {
+      const e = { code: code, at: now };
+      if (status) e.status = status;
+      return e;
+    };
+    if (r.error === 'timeout' || r.error === 'offline' || !Number.isInteger(r.status)) {
+      s.lastError = fail(r.error === 'timeout' ? 'timeout' : 'offline');
+      return s;
+    }
+    const status = r.status;
+    if (status === 403 || status === 429 || (status >= 500 && status <= 599)) {
+      s.retryAt = updateBackoff(status, r.headers, s.fails, now);
+      s.fails = Math.min(s.fails + 1, 100);
+      s.lastError = fail(status >= 500 ? 'http' : 'rate', status);
+      return s;
+    }
+    s.checkedAt = now;
+    s.fails = 0;
+    s.retryAt = 0;
+    s.lastError = null;
+    if (status === 200) {
+      const latest = parseRelease(r.json);
+      if (!latest) {
+        s.etag = null;
+        s.lastError = fail('invalid');
+        return s;
+      }
+      s.latest = latest;
+      s.etag = typeof r.etag === 'string' && r.etag && r.etag.length <= 200 ? r.etag : null;
+    } else if (status === 404) {
+      s.latest = null;
+      s.etag = null;
+    } else if (status !== 304) {
+      s.lastError = fail('http', status);
+    }
+    return s;
+  }
+
+  // 「跳过此版本」：这个版本不再提醒（更新的版本照常提醒）；版本号不合法返回 null
+  function updateSkip(state, version) {
+    if (!updateVersion(version)) return null;
+    const s = normUpdateState(state);
+    s.skipped = version;
+    return s;
+  }
+
+  // ×：这个版本 7 天内不再提醒；版本号不合法返回 null
+  function updateSnooze(state, version, now) {
+    if (!updateVersion(version)) return null;
+    const s = normUpdateState(state);
+    s.snoozeVersion = version;
+    s.snoozeUntil = now + UPDATE_SNOOZE_MS;
+    return s;
+  }
+
   // 本地组件需要的 caps（以后哪个版本加了新 cap 就加到这里）
   const NV_HOST_CAPS = Object.freeze(['display', 'hdrLease']);
 
@@ -2517,6 +2635,11 @@
     updateBackoff: updateBackoff,
     updateDue: updateDue,
     updateNotice: updateNotice,
+    UPDATE_SNOOZE_MS: UPDATE_SNOOZE_MS,
+    normUpdateState: normUpdateState,
+    updateAfter: updateAfter,
+    updateSkip: updateSkip,
+    updateSnooze: updateSnooze,
     NV_HOST_CAPS: NV_HOST_CAPS,
     nvHostCheck: nvHostCheck,
     diagRedact: diagRedact

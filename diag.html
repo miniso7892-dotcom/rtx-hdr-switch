@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title data-i18n="diag.title">RTX HDR 开关诊断</title>
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 128 128" aria-hidden="true">
+        <rect x="0" y="0" width="128" height="128" rx="14" class="logo-bg"></rect>
+        <rect x="21" y="33" width="86" height="62" class="logo-screen"></rect>
+        <rect x="16" y="28" width="48" height="72" class="logo-lit"></rect>
+        <rect x="58" y="14" width="13" height="100" class="logo-bar"></rect>
+      </svg>
+      <h1 data-i18n="diag.title">RTX HDR 开关诊断</h1>
+    </div>
+  </header>
+
+  <main class="wrap wrap-wide">
+    <div class="bar">
+      <button type="button" class="btn" id="btn-refresh" data-i18n="diag.refresh">刷新</button>
+      <button type="button" class="btn accent" id="btn-copy" data-i18n="diag.copy">复制诊断信息</button>
+      <label class="check-line"><input type="checkbox" id="raw"><span data-i18n="diag.includeRaw">包含网址和设备名</span></label>
+    </div>
+    <p class="msg" id="msg" role="status" aria-live="polite"></p>
+
+    <div class="stack" id="sections" hidden>
+      <section class="card" aria-labelledby="h-host">
+        <h2 id="h-host" data-i18n="diag.host">本地组件</h2>
+        <p class="strong" id="host-verdict"></p>
+        <p class="muted" id="host-hint" hidden></p>
+        <pre id="host-raw"></pre>
+      </section>
+
+      <section class="card" aria-labelledby="h-state">
+        <h2 id="h-state" data-i18n="diag.state">NVIDIA 原始状态</h2>
+        <pre id="state-raw"></pre>
+      </section>
+
+      <section class="card" aria-labelledby="h-displays">
+        <h2 id="h-displays" data-i18n="diag.displays">显示器</h2>
+        <pre id="displays-raw"></pre>
+      </section>
+
+      <section class="card" aria-labelledby="h-lease">
+        <h2 id="h-lease" data-i18n="diag.lease">只关 HDR 借用</h2>
+        <pre id="lease-raw"></pre>
+      </section>
+
+      <section class="card" id="sec-frames" aria-labelledby="h-frames" hidden>
+        <h2 id="h-frames" data-i18n="diag.frames">当前标签页的 frame</h2>
+        <pre id="frames-raw"></pre>
+      </section>
+
+      <section class="card" aria-labelledby="h-log">
+        <h2 id="h-log" data-i18n="diag.log">NVIDIA 修改记录</h2>
+        <ol class="log" id="log-list" aria-labelledby="h-log"></ol>
+      </section>
+
+      <section class="card" aria-labelledby="h-alarms">
+        <h2 id="h-alarms" data-i18n="diag.alarms">定时任务</h2>
+        <pre id="alarms-raw"></pre>
+      </section>
+
+      <section class="card" aria-labelledby="h-storage">
+        <h2 id="h-storage" data-i18n="diag.storage">存储用量</h2>
+        <p id="storage-line"></p>
+      </section>
+
+      <section class="card" aria-labelledby="h-update">
+        <h2 id="h-update" data-i18n="diag.update">更新检查</h2>
+        <p id="update-line"></p>
+        <button type="button" class="btn small" id="btn-check" data-i18n="update.checkNow" hidden>立即检查</button>
+        <p class="msg" id="update-msg" role="status"></p>
+        <pre id="update-raw"></pre>
+      </section>
+
+      <section class="card" aria-labelledby="h-settings">
+        <h2 id="h-settings" data-i18n="diag.settings">设置</h2>
+        <pre id="settings-raw"></pre>
+      </section>
+    </div>
+  </main>
+
+  <script src="i18n.js"></script>
+  <script src="lib.js"></script>
+  <script src="diag.js"></script>
+</body>
+</html>

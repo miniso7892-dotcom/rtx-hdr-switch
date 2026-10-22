@@ -79,6 +79,17 @@ body {
 
 .tabs button:focus-visible { outline-offset: -5px; outline-color: var(--accent-fg); }
 
+/* 有新版本：规则页签的标签后面一个主题色小点 */
+.tabs button.has-dot::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  vertical-align: 2px;
+  background: var(--accent);
+}
+
 main { flex: 1; min-height: 0; display: flex; }
 
 .panel { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; scrollbar-color: var(--ink) transparent; }
@@ -233,6 +244,24 @@ input[type="number"] {
   text-transform: uppercase;
 }
 
+.foot-end { display: flex; align-items: center; gap: 12px; }
+
+.foot-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--bar-fg);
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* 有新版本时版本号用主题色 */
+#foot-version.is-new { color: var(--accent-fg); }
+
 .panel-foot.split { padding: 0; min-height: 40px; }
 
 .panel-foot.split button {
@@ -324,6 +353,12 @@ input[type="number"] {
 .push { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-family: var(--f-ui); font-weight: 800; }
 
 .row-check { font-size: 12px; }
+
+.nv-last { flex: none; display: flex; align-items: baseline; gap: 10px; padding: 6px 14px 0; font-size: 12px; font-weight: 700; line-height: 1.45; }
+
+.nv-last-text { flex: 1; min-width: 0; }
+
+.nv-last .link { flex: none; font-size: 12px; }
 
 .nv-msg { margin: 0; padding: 6px 14px; font-size: 12px; font-weight: 700; line-height: 1.45; }
 
@@ -478,6 +513,31 @@ textarea.pf-input { resize: vertical; font: 500 11px/1.4 Consolas, "Courier New"
 .pf-msg:empty { display: none; }
 
 .pf-msg.warn { color: var(--warn); }
+
+/* 更新提醒 */
+
+.update { background: var(--accent); color: var(--on-accent); }
+
+.update .btn { border-color: var(--on-accent); }
+
+.update .btn.accent { background: var(--on-accent); color: var(--accent); border-color: var(--on-accent); }
+
+.update :focus-visible { outline-color: var(--on-accent); }
+
+.up-skip { margin-left: auto; }
+
+.up-x {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid var(--on-accent);
+  border-radius: 0;
+  background: transparent;
+  color: var(--on-accent);
+  font: 800 15px/1 var(--f-ui);
+  cursor: pointer;
+}
 
 /* 已绑定 NVIDIA 预设的网站 */
 

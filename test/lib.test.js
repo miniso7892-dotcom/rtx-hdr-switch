@@ -2983,6 +2983,220 @@ test('i18n P5：三个概念用标题和位置区分，删掉的说明键不再�
   }
 });
 
+// ---------- 1.3 P6：诊断页、修改记录的撤销、更新检查 ----------
+
+const RELEASE_JSON = (tag, extra) => Object.assign({
+  tag_name: tag, name: 'RTX HDR Switch ' + tag, draft: false, prerelease: false, html_url: REPO + 'tag/' + tag, published_at: '2026-11-01T00:00:00Z',
+  assets: [{ name: 'rtx-hdr-switch-' + tag + '.zip', browser_download_url: REPO + 'download/' + tag + '/rtx-hdr-switch-' + tag + '.zip' }]
+}, extra);
+
+test('normUpdateState：默认值、坏字段、latest 必须指向本仓库', () => {
+  const d = L.normUpdateState(undefined);
+  assert.deepEqual(d, { v: 1, checkedAt: 0, etag: null, latest: null, skipped: null, snoozeUntil: 0, snoozeVersion: null, fails: 0, retryAt: 0, lastError: null });
+  const raw = { checkedAt: -5, etag: 'x'.repeat(201), fails: 2.5, retryAt: 'soon', skipped: 'v1.4.0', snoozeVersion: 'nope', lastError: { code: 'weird', at: 1 },
+    latest: { version: '1.4.0', url: 'https://evil.example/releases/', zip: null } };
+  const before = JSON.stringify(raw);
+  const n = L.normUpdateState(raw);
+  assert.equal(JSON.stringify(raw), before, '不修改输入');
+  assert.deepEqual([n.checkedAt, n.etag, n.fails, n.retryAt, n.skipped, n.snoozeVersion, n.lastError, n.latest], [0, null, 0, 0, 'v1.4.0', null, null, null]);
+  const ok = L.normUpdateState({ latest: L.parseRelease(RELEASE_JSON('v1.4.0')), lastError: { code: 'http', status: 502, at: 7 } });
+  assert.equal(ok.latest.version, '1.4.0');
+  assert.deepEqual(ok.lastError, { code: 'http', status: 502, at: 7 });
+  assert.equal(L.normUpdateState({ latest: Object.assign({}, ok.latest, { zip: 'https://evil.example/a.zip' }) }).latest.zip, null, '外站 zip 丢掉');
+});
+
+test('updateAfter：200 / 304 / 404、限流和 5xx 退避、离线和超时不改检查时间、认不出的回复', () => {
+  const now = 2e12, H = 3600000;
+  let s = L.updateAfter(null, { status: 200, etag: 'W/"abc"', json: RELEASE_JSON('v1.4.0') }, now);
+  assert.equal(s.checkedAt, now);
+  assert.equal(s.etag, 'W/"abc"');
+  assert.equal(s.latest.version, '1.4.0');
+  assert.ok(/rtx-hdr-switch-v1\.4\.0\.zip$/.test(s.latest.zip));
+  assert.deepEqual(L.updateNotice(s, '1.3.0', now), { version: '1.4.0', url: REPO + 'tag/v1.4.0', zip: s.latest.zip });
+  // 304：latest 和 ETag 不变，只更新检查时间
+  const s304 = L.updateAfter(s, { status: 304 }, now + 25 * H);
+  assert.deepEqual([s304.checkedAt, s304.etag, s304.latest.version, s304.lastError], [now + 25 * H, 'W/"abc"', '1.4.0', null]);
+  // 限流：Retry-After / X-RateLimit-Reset，fails 递增，不改检查时间和 latest
+  const r1 = L.updateAfter(s, { status: 403, headers: { remaining: '0', reset: String((now + 2 * H) / 1000) } }, now + H);
+  assert.deepEqual([r1.retryAt, r1.fails, r1.checkedAt, r1.lastError.code, r1.lastError.status], [now + 2 * H, 1, now, 'rate', 403]);
+  assert.equal(L.updateDue(r1, now + 1.5 * H), false, '退避期内不请求');
+  const r2 = L.updateAfter(s, { status: 429, headers: { retryAfter: '90' } }, now);
+  assert.equal(r2.retryAt, now + 90000);
+  // 5xx：3 → 6 → 12 → 24 小时
+  let x = s;
+  const waits = [];
+  for (let i = 0; i < 5; i++) {
+    x = L.updateAfter(x, { status: 502 }, now);
+    waits.push((x.retryAt - now) / H);
+  }
+  assert.deepEqual(waits, [3, 6, 12, 24, 24]);
+  assert.deepEqual([x.lastError.code, x.lastError.status, x.latest.version], ['http', 502, '1.4.0']);
+  // 成功一次后清零
+  const back = L.updateAfter(x, { status: 304 }, now + 30 * H);
+  assert.deepEqual([back.fails, back.retryAt, back.lastError], [0, 0, null]);
+  // 离线、超时：只记错误，不改检查时间、不退避
+  for (const err of ['offline', 'timeout']) {
+    const o = L.updateAfter(s, { error: err }, now + 30 * H);
+    assert.deepEqual([o.checkedAt, o.retryAt, o.fails, o.lastError.code, o.latest.version], [now, 0, 0, err, '1.4.0']);
+    assert.equal(L.updateDue(o, now + 30 * H), true, '下一轮闹钟照样请求');
+  }
+  assert.equal(L.updateAfter(s, null, now).lastError.code, 'offline');
+  // 404：还没有发布版
+  const nf = L.updateAfter(s, { status: 404 }, now);
+  assert.deepEqual([nf.latest, nf.etag, nf.lastError], [null, null, null]);
+  // 认不出的 200（prerelease、外站链接、不是 JSON）：latest 不变，ETag 作废，记 invalid，24 小时后再查
+  for (const json of [RELEASE_JSON('v1.5.0', { prerelease: true }), RELEASE_JSON('v1.5.0', { html_url: 'https://evil.example/x' }), null]) {
+    const iv = L.updateAfter(s, { status: 200, etag: '"new"', json: json }, now + H);
+    assert.deepEqual([iv.latest.version, iv.etag, iv.lastError.code, iv.checkedAt], ['1.4.0', null, 'invalid', now + H]);
+  }
+  // 其他状态码：记 http，等 24 小时
+  const other = L.updateAfter(s, { status: 401 }, now + H);
+  assert.deepEqual([other.lastError.code, other.lastError.status, other.retryAt, other.checkedAt], ['http', 401, 0, now + H]);
+  // 不修改输入
+  const frozen = JSON.stringify(s);
+  L.updateAfter(s, { status: 502 }, now);
+  assert.equal(JSON.stringify(s), frozen);
+});
+
+test('updateSkip / updateSnooze：跳过的版本不再提醒，7 天内不提醒，更新的版本照常提醒', () => {
+  const now = 2e12;
+  const s = L.updateAfter(null, { status: 200, json: RELEASE_JSON('v1.4.0') }, now);
+  const sk = L.updateSkip(s, '1.4.0');
+  assert.equal(L.updateNotice(sk, '1.3.0', now), null);
+  assert.equal(L.updateSkip(s, 'x.y'), null);
+  const sn = L.updateSnooze(s, '1.4.0', now);
+  assert.equal(sn.snoozeUntil, now + L.UPDATE_SNOOZE_MS);
+  assert.equal(L.UPDATE_SNOOZE_MS, 7 * 24 * 3600000);
+  assert.equal(L.updateNotice(sn, '1.3.0', now + L.UPDATE_SNOOZE_MS - 1), null);
+  assert.ok(L.updateNotice(sn, '1.3.0', now + L.UPDATE_SNOOZE_MS));
+  const newer = L.updateAfter(sk, { status: 200, json: RELEASE_JSON('v1.4.1') }, now + 1);
+  assert.equal(L.updateNotice(newer, '1.3.0', now + 1).version, '1.4.1', '跳过 1.4.0 不影响 1.4.1');
+  assert.equal(L.updateSnooze(s, null, now), null);
+});
+
+test('icon-draw.js：imageDataSet(accent, {dot}) 在右上角加小点', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'icon-draw.js'), 'utf8');
+  assert.ok(/function imageDataSet\(accent, opts\)/.test(src) && /dot: !!\(opts && opts\.dot\)/.test(src));
+  assert.ok(/if \(opts && opts\.dot\) \{/.test(src));
+  const test = fs.readFileSync(path.join(ROOT, 'tools', 'icon-draw-test.js'), 'utf8');
+  assert.ok(/imageDataSet\('#0f0', \{ dot: true \}\)/.test(test), '自测页覆盖小点');
+});
+
+test('background：更新检查只对解压安装、不带 Cookie、带 ETag、按 updateDue 和退避、图标小点', () => {
+  const src = srcOf('background.js');
+  assert.ok(/const UPDATE_API = 'https:\/\/api\.github\.com\/repos\/miniso7892-dotcom\/rtx-hdr-switch\/releases\/latest';/.test(src));
+  assert.ok(/const UPDATE_PERIOD_MIN = 180;/.test(src));
+  assert.ok(/s\.updateCheck && type === 'development'/.test(bgFn(src, 'updateEnabled')));
+  assert.ok(/chrome\.management\.getSelf\(\)/.test(bgFn(src, 'installType')));
+  const f = bgFn(src, 'updateFetch');
+  for (const re of [/cache: 'no-store'/, /credentials: 'omit'/, /referrerPolicy: 'no-referrer'/, /headers\['If-None-Match'\] = etag/, /ctl\.abort\(\), UPDATE_TIMEOUT_MS/]) assert.ok(re.test(f), re);
+  const run = bgFn(src, 'updateRun');
+  assert.ok(/if \(!\(await updateEnabled\(\)\)\) return \{ ok: false, code: 'disabled' \}/.test(run));
+  assert.ok(/now < st\.retryAt/.test(run) && /!force && !L\.updateDue\(st, now\)/.test(run));
+  assert.ok(/updateTxn\(\(cur\) => L\.updateAfter\(cur, res, Date\.now\(\)\)\)/.test(run), '结果按 L.updateAfter 存');
+  assert.ok(/icon\.imageDataSet\(L\.normAccent\(accent\), \{ dot: updateDot \}\)/.test(bgFn(src, 'applyIcon')));
+  assert.ok(/!!\(await updateView\(\)\)\.notice/.test(bgFn(src, 'updateRefreshDot')));
+  assert.ok(/dev && s\.updateCheck \? L\.updateNotice\(state, version, Date\.now\(\)\) : null/.test(bgFn(src, 'updateView')));
+  const sync = bgFn(src, 'updateSync');
+  assert.ok(/delayInMinutes: UPDATE_DELAY_MIN, periodInMinutes: UPDATE_PERIOD_MIN/.test(sync) && /chrome\.alarms\.clear\(UPDATE_ALARM\)/.test(sync));
+  assert.ok(/alarm\.name === UPDATE_ALARM\) updateRun\(false\)\.then\(updateRefreshDot\)/.test(src));
+  assert.ok(/prev\.updateCheck !== settingsCache\.updateCheck\) updateSync\(\)/.test(src), '关掉检查时清闹钟、去小点');
+  assert.ok(/await updateSync\(\)/.test(bgFn(src, 'onBrowserStart')));
+  // 只有 background 写 updateState
+  for (const file of fs.readdirSync(ROOT).filter((x) => /\.js$/.test(x) && x !== 'background.js')) {
+    assert.ok(!storageWrites(srcOf(file)).some((w) => /updateState|UPDATE_KEY/.test(w.args)), file);
+  }
+});
+
+test('background：update 和 diag 消息只给扩展页面（面板不行），diag 的 tabId 先检查', () => {
+  const src = srcOf('background.js');
+  assert.ok(/msg\.type === 'update' && page && page !== 'panel'/.test(src));
+  assert.ok(/msg\.type === 'diag' && msg\.op === 'snapshot' && page && page !== 'panel'/.test(src));
+  assert.ok(/!validTabId\(msg\.tabId\)\) \{\s*sendResponse\(\{ ok: false, code: 'bad-request' \}\)/.test(src));
+  const u = bgFn(src, 'updateHandle');
+  assert.ok(/L\.semverCmp\(msg\.version, msg\.version\) !== 0/.test(u), 'skip / snooze 的版本号先检查');
+  const d = bgFn(src, 'diagSnapshot');
+  for (const k of ["cmd: 'hello'", "cmd: 'get'", "cmd: 'display'", 'L.nvHostCheck(hello)', 'hoLeaseInfo()', 'getBytesInUse', 'chrome.alarms.getAll()', 'L.nvNormLog(', 'maxVideos: L.MAX_VIDEO_ENTRIES']) {
+    assert.ok(d.includes(k), k);
+  }
+  assert.ok(EXT_PAGES_OF(src).includes('/diag.html'));
+});
+
+function EXT_PAGES_OF(src) {
+  return (/const EXT_PAGES = \[([^\]]*)\]/.exec(src) || [])[1] || '';
+}
+
+test('diag.html / diag.js：元素 id 都在、i18n 键都存在、引用的文件都在、默认脱敏、不用 innerHTML', () => {
+  const I = require('../i18n.js');
+  const keys = new Set(Object.keys(I.DICT.zh));
+  const html = fs.readFileSync(path.join(ROOT, 'diag.html'), 'utf8');
+  const js = srcOf('diag.js');
+  const ids = new Set(Array.from(html.matchAll(/\bid="([^"]+)"/g), (m) => m[1]));
+  for (const m of js.matchAll(/\$\('([^']+)'\)/g)) assert.ok(ids.has(m[1]), '缺少 #' + m[1]);
+  for (const m of html.matchAll(/data-i18n="([^"]+)"/g)) assert.ok(keys.has(m[1]), m[1]);
+  for (const m of js.matchAll(/\bt\('([a-z][\w.-]*)'\s*[,)]/g)) assert.ok(keys.has(m[1]), m[1]);
+  for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) assert.ok(fs.existsSync(path.join(ROOT, m[1])), m[1]);
+  assert.ok(/href="options\.css"/.test(html), '复用 options.css');
+  // 显示和复制的是同一份：默认 L.diagRedact，勾选「包含网址和设备名」才用原文
+  assert.ok(/\$\('raw'\)\.checked \? data : L\.diagRedact\(data\)/.test(fnBody(js, 'view')));
+  assert.ok(/navigator\.clipboard\.writeText\(json\(v\)\)/.test(fnBody(js, 'copy')) && /const v = view\(\)/.test(fnBody(js, 'copy')));
+  assert.ok(!/<input[^>]*id="raw"[^>]*checked/.test(html), '默认不勾选原文');
+  assert.ok(/\{ type: 'diag', op: 'snapshot' \}/.test(js) && /\?tab=\(\\d\{1,10\}\)/.test(js));
+  // 没装本地组件时给出重新安装的办法；没有指定标签页时不显示 frame 一节
+  assert.ok(/c\.code === 'host-missing'/.test(fnBody(js, 'renderHost')) && /t\('diag\.hostMoved'\)/.test(fnBody(js, 'renderHost')));
+  assert.ok(/\$\('sec-frames'\)\.hidden = !snap\.tab/.test(js));
+  assert.ok(!/innerHTML/.test(js));
+  assert.equal(storageWrites(js).length, 0);
+});
+
+test('弹窗 P6：NVIDIA 页签修改后 10 秒内显示「上一次」和撤销（nv-op undo），规则页签的更新提醒卡、诊断入口', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
+  const js = srcOf('popup.js');
+  // 「上一次」在 NVIDIA 页签里，撤销按钮有文字
+  const nvPanel = html.slice(html.indexOf('id="panel-nv"'), html.indexOf('id="panel-rules"'));
+  assert.ok(/id="nv-last"/.test(nvPanel) && /<button type="button" class="link" id="nv-undo" data-i18n="nv\.undo">/.test(nvPanel));
+  assert.ok(/const NV_LAST_MS = 10000;/.test(js));
+  const acc = fnBody(js, 'nvLastAccept');
+  assert.ok(/list\[i\]\.source !== 'lease'/.test(acc) && /e\.ok && e\.undoable && !e\.undone && e\.source !== 'undo'/.test(acc));
+  assert.ok(/e\.at \+ NV_LAST_MS - Date\.now\(\)/.test(fnBody(js, 'renderNvLast')));
+  assert.ok(/e\.source === 'popup' \? t\('nv\.last'/.test(fnBody(js, 'renderNvLast')), '自己刚改的不写来源');
+  assert.ok(/nv\.exclusive\(\(\) => nvOp\(\{ op: 'undo' \}\)\)/.test(fnBody(js, 'nvUndoLast')));
+  assert.ok(/area === 'session' && changes\[NV_LOG_KEY\]\) nvLastAccept/.test(js));
+  // 更新提醒卡在规则页签最上面：版本、先导出备份、zip、发布页、跳过此版本、×（7 天内不再提醒，有可访问名称）
+  const rules = html.slice(html.indexOf('id="panel-rules"'));
+  assert.ok(rules.indexOf('id="up-card"') < rules.indexOf('id="pf-title"'));
+  for (const id of ['up-title', 'up-backup', 'up-zip', 'up-release', 'up-skip']) assert.ok(rules.includes('id="' + id + '"'), id);
+  assert.ok(/<button [^>]*id="up-snooze"[^>]*aria-label="[^"]+"[^>]*data-i18n-attr="aria-label:update\.snooze;title:update\.snooze"/.test(rules));
+  assert.ok(/<label class="check row-check" id="update-check-row" hidden><input type="checkbox" id="update-check">/.test(rules));
+  const ru = fnBody(js, 'renderUpdate');
+  assert.ok(/\$\('tab-rules'\)\.classList\.toggle\('has-dot', !!n\)/.test(ru) && /\$\('update-check-row'\)\.hidden = !\(upView && upView\.dev\)/.test(ru));
+  assert.ok(/updateMsg\(op, \{ version: n\.version \}\)/.test(fnBody(js, 'dismissUpdate')));
+  assert.ok(/'skip'/.test(js) && /'snooze'/.test(js) && /openOptions\('#export'\)/.test(fnBody(js, 'bindUpdate')));
+  assert.ok(/setText\('foot-version', v\)\.classList\.toggle\('is-new'/.test(fnBody(js, 'renderFoot')));
+  assert.ok(/'diag\.html' \+ \(tabId !== null \? '\?tab=' \+ tabId : ''\)/.test(fnBody(js, 'bindUpdate')));
+  assert.ok(/\.tabs button\.has-dot::after/.test(fs.readFileSync(path.join(ROOT, 'popup.css'), 'utf8')));
+  // 选项页的诊断入口
+  assert.ok(/<a class="top-link" id="diag-link" href="diag\.html" data-i18n="diag\.link">/.test(fs.readFileSync(path.join(ROOT, 'options.html'), 'utf8')));
+});
+
+test('i18n P6：删掉的说明键不再出现，用到的键齐全，没有含糊词', () => {
+  const I = require('../i18n.js');
+  const all = ['popup.js', 'popup.html', 'options.js', 'options.html', 'diag.js', 'diag.html', 'background.js'].map((f) => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n');
+  for (const k of ['update.available', 'update.howTo', 'update.checkDesc', 'update.lastChecked', 'update.notUnpacked', 'diag.redactNote', 'diag.framesNone', 'diag.logEmpty']) {
+    assert.ok(!(k in I.DICT.zh) && !(k in I.DICT.en), k);
+    assert.ok(!all.includes("'" + k + "'") && !all.includes('"' + k + '"'), k + ' 仍被引用');
+  }
+  for (const k of ['nv.last', 'nv.undoLast', 'update.title', 'update.snooze', 'update.check', 'diag.settings', 'diag.link']) {
+    for (const l of ['zh', 'en']) assert.ok(I.DICT[l][k], l + ' ' + k);
+  }
+  assert.equal(I.t('zh', 'update.title', { version: '1.4.0' }), '新版本 1.4.0');
+  for (const l of ['zh', 'en']) {
+    for (const k of Object.keys(I.DICT[l]).filter((x) => /^(update|diag)\./.test(x) || x === 'nv.last')) {
+      assert.ok(!/约|大概|可能|稍后|\bmay\b|\bmight\b|\bprobably\b|\blater\b/.test(I.DICT[l][k]), l + ' ' + k + '：' + I.DICT[l][k]);
+    }
+  }
+});
+
 // ---------- 运行 ----------
 
 let passed = 0;

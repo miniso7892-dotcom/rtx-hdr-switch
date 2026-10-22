@@ -113,7 +113,10 @@
 
       <footer class="panel-foot">
         <span id="foot-auto-key"></span>
-        <span id="foot-version"></span>
+        <span class="foot-end">
+          <button type="button" class="foot-link" id="foot-diag" data-i18n="diag.link">诊断</button>
+          <span id="foot-version"></span>
+        </span>
       </footer>
     </section>
 
@@ -211,6 +214,10 @@
         <label class="check row-check" id="nv-indicator-row"><input type="checkbox" id="nv-indicator"><span data-i18n="nv.indicator">在视频上显示 NVIDIA 状态指示器</span></label>
         <p class="note" id="nv-app-hint" data-i18n="nv.appHint">NVIDIA App 开着时，要离开再进入它的「视频」页才会显示新值；在旧页面上调整会把这里的修改改回去。</p>
       </div>
+      <div class="nv-last" id="nv-last" hidden>
+        <span class="nv-last-text" id="nv-last-text"></span>
+        <button type="button" class="link" id="nv-undo" data-i18n="nv.undo">撤销</button>
+      </div>
       <p class="nv-msg" id="nv-msg" role="status" aria-live="polite"></p>
 
       <footer class="panel-foot presets" id="nv-presets">
@@ -233,6 +240,18 @@
 
     <!-- ================= 规则 ================= -->
     <section class="panel" id="panel-rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+      <section class="block update" id="up-card" aria-labelledby="up-title" hidden>
+        <div class="block-head">
+          <h2 id="up-title"></h2>
+          <button type="button" class="up-x" id="up-snooze" aria-label="7 天内不再提醒" title="7 天内不再提醒" data-i18n-attr="aria-label:update.snooze;title:update.snooze">×</button>
+        </div>
+        <div class="pf-row">
+          <button type="button" class="btn small" id="up-backup" data-i18n="update.backupFirst">先导出备份</button>
+          <button type="button" class="btn small accent" id="up-zip" data-i18n="update.download">下载 zip</button>
+          <button type="button" class="btn small" id="up-release" data-i18n="update.release">发布页</button>
+          <button type="button" class="link up-skip" id="up-skip" data-i18n="update.skip">跳过此版本</button>
+        </div>
+      </section>
       <section class="block profiles" aria-labelledby="pf-title">
         <div class="block-head">
           <h2 id="pf-title" data-i18n="profile.title">配置档</h2>
@@ -339,6 +358,7 @@
           <label><input type="radio" name="player-panel" value="off"><span data-i18n="rules.panelOff">关闭</span></label>
         </span>
       </div>
+      <label class="check row-check" id="update-check-row" hidden><input type="checkbox" id="update-check"><span data-i18n="update.check">检查新版本</span></label>
 
       <section class="block keys" aria-labelledby="keys-title">
         <div class="block-head">

@@ -2,8 +2,9 @@
  * RTX HDR 开关 —— 运行时画工具栏图标（方案 C · 高反差信号），分隔条用当前主题色。
  * 经典脚本（不是 ES module）：service worker 里 importScripts('icon-draw.js')，页面里 <script src="icon-draw.js">。
  *
- *   self.RtxHdrIcon.draw(size, accent)      → ImageData（size×size，size 为 1..1024 的整数，否则抛 RangeError）
- *   self.RtxHdrIcon.imageDataSet(accent)    → { 16: ImageData, 32: ImageData }，可直接给 chrome.action.setIcon({ imageData })
+ *   self.RtxHdrIcon.draw(size, accent, opts)         → ImageData（size×size，size 为 1..1024 的整数，否则抛 RangeError）
+ *   self.RtxHdrIcon.imageDataSet(accent, opts)       → { 16: ImageData, 32: ImageData }，可直接给 chrome.action.setIcon({ imageData })
+ *     opts.dot：右上角加一个主题色小点（有新版本），外面一圈底色把它和屏幕边框隔开；不占用角标文字
  *   self.RtxHdrIcon.normalizeAccent(accent) → '#RRGGBB'（不合法时退回 DEFAULT_ACCENT）
  *   self.RtxHdrIcon.DEFAULT_ACCENT          → '#A98BFF'
  *
@@ -26,6 +27,8 @@
 
   // screen=[x, y, w, h] 是屏幕外框（描边居中，宽 stroke），fill 是实心的左半，bar 是主题色分隔条
   const BASE = { stroke: 6, screen: [21, 33, 86, 62], fill: [18, 30, 46, 68], bar: [60, 18, 9, 92] };
+  // 提醒小点：圆心、半径、底色外圈的半径（128 的 viewBox）
+  const DOT = { cx: 100, cy: 28, r: 19, ring: 28 };
   const VARIANTS = {
     16: { stroke: 14, screen: [20, 32, 88, 64], fill: [13, 25, 51, 78], bar: [56, 10, 17, 108] },
     32: { stroke: 10, screen: [21, 33, 86, 62], fill: [16, 28, 48, 72], bar: [58, 14, 13, 100] },
@@ -51,7 +54,14 @@
     ctx.fill();
   }
 
-  function draw(size, accent) {
+  function fillCircle(ctx, cx, cy, r, color) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
+  function draw(size, accent, opts) {
     const n = Number(size);
     if (!Number.isInteger(n) || n < 1 || n > MAX_SIZE) {
       throw new RangeError('RtxHdrIcon.draw: size must be an integer in 1..' + MAX_SIZE + ', got ' + size);
@@ -81,12 +91,18 @@
     ctx.fillStyle = normalizeAccent(accent);
     ctx.fillRect(b[0] * k, b[1] * k, b[2] * k, b[3] * k);
 
+    if (opts && opts.dot) {
+      fillCircle(ctx, DOT.cx * k, DOT.cy * k, DOT.ring * k, BG);
+      fillCircle(ctx, DOT.cx * k, DOT.cy * k, DOT.r * k, normalizeAccent(accent));
+    }
+
     return ctx.getImageData(0, 0, n, n);
   }
 
-  function imageDataSet(accent) {
+  function imageDataSet(accent, opts) {
     const a = normalizeAccent(accent);
-    return { 16: draw(16, a), 32: draw(32, a) };
+    const o = { dot: !!(opts && opts.dot) };
+    return { 16: draw(16, a, o), 32: draw(32, a, o) };
   }
 
   const api = Object.freeze({
