@@ -56,6 +56,8 @@
   let activityAt = 0;
   let peekOn = false;
   let dragHold = false; // 拖滑块期间告诉内容脚本别按「离开」收起
+  let thirdParty = false; // 播放器嵌在别的网站里（上层页面有不是播放器网站的）
+  let seen = false; // IntersectionObserver v2 最近一次报告的 isVisible
   let langSig = '';
   let presetSig = '';
   let profileSig = '';
@@ -86,10 +88,11 @@
     return U.setText($(id), text);
   }
 
-  // 用户在显示着的面板里的可信操作才算。收起以后焦点还留在面板里时的按键不算，界面撤回原样
+  // 用户在显示着的面板里的可信操作才算。收起以后焦点还留在面板里时的按键不算，界面撤回原样。
+  // 嵌在别的网站里时还要 IOv2 确认面板真的看得见
   function act(e) {
     if (!e.isTrusted) return false;
-    if (open) return true;
+    if (open && (!thirdParty || seen)) return true;
     renderAll();
     return false;
   }
@@ -119,7 +122,28 @@
     if (!ao || !ao.length) return false;
     let u;
     try { u = new URL(ao[0]); } catch (e) { return false; }
-    return (u.protocol === 'https:' || u.protocol === 'http:') && !!L.playerSite(u.hostname, '/');
+    // ancestorOrigins 没有路径：只核对域名（youtube-nocookie.com 只有 /embed 才算播放器）
+    if (!((u.protocol === 'https:' || u.protocol === 'http:') && L.isPlayerHost(u.hostname))) return false;
+    for (let i = 1; i < ao.length; i++) {
+      let a = null;
+      try { a = new URL(ao[i]); } catch (e) { a = null; }
+      if (!a || !L.isPlayerHost(a.hostname)) thirdParty = true;
+    }
+    return true;
+  }
+
+  // 防点击劫持：内容脚本的遮挡检查只看得到播放器自己的文档，第三方网页把嵌入的播放器改透明、盖住它都查不到。
+  // 嵌在别的网站里时用 IntersectionObserver v2（算上各层页面的透明度、filter、transform 和遮挡）给写入把关；
+  // 用不了时一律不写
+  function watchVisibility() {
+    if (!thirdParty) return;
+    try {
+      const io = new IntersectionObserver((entries) => {
+        const e = entries[entries.length - 1];
+        seen = !!e && e.isVisible === true;
+      }, { trackVisibility: true, delay: 100 });
+      io.observe(document.documentElement);
+    } catch (e) { seen = false; }
   }
 
   // 连上插入我们的内容脚本：标签页来自 tabs.getCurrent，父 frame 的 id 和 nonce 在 hash 里（内容脚本经 location.replace
@@ -881,6 +905,7 @@
 
   async function init() {
     if (!embeddedInPlayer()) return;
+    watchVisibility();
     try {
       const r = await chrome.storage.local.get(['settings', HDR_ONLY_KEY, NV_LAST_PRESET_KEY, TAB_KEY]);
       stored = L.mergeSettings(r && r.settings);

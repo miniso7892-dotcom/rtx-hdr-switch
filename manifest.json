@@ -62,12 +62,16 @@
       ],
       "matches": [
         "https://bilibili.com/*",
+        "https://live.bilibili.com/*",
         "https://player.bilibili.com/*",
         "https://twitch.tv/*",
         "https://v.qq.com/*",
         "https://www.bilibili.com/*",
+        "https://www.iqiyi.com/*",
         "https://www.twitch.tv/*",
+        "https://www.youtube-nocookie.com/*",
         "https://www.youtube.com/*",
+        "https://youtube-nocookie.com/*",
         "https://youtube.com/*"
       ],
       "use_dynamic_url": true

@@ -372,6 +372,16 @@
   function onDomMutations(records) {
     // 控制栏被网站重建、按钮跟着没了：下一帧重新放（只看一次 isConnected，不另外观察）
     if (pbtn && !btnRaf && !pbtn.el.isConnected) btnRaf = requestAnimationFrame(onBtnLost);
+    // 会重建控制栏的网站：等按钮期间，包着控制栏的稳定元素里加了节点（控制栏重建出来了）就下一帧放按钮。
+    // 只看有新增节点的记录在不在它里面，弹幕等别处的变动不走这条路
+    if (btnWatch && !pbtn && !btnRaf) {
+      for (let r = 0; r < records.length; r++) {
+        if (records[r].addedNodes.length && btnWatch.contains(records[r].target)) {
+          btnRaf = requestAnimationFrame(onBarRebuilt);
+          break;
+        }
+      }
+    }
     // 面板 iframe 被网站拿掉了（React 重渲染等）：直接销毁，下次悬停时重建（不把它插回去，插回去会重新加载）
     if (pnl && !pnl.frame.isConnected) destroyPanel();
     let removed = false;
@@ -1110,10 +1120,16 @@
 
   // 各网站的控制栏（选择器只写在这里）：
   //   root：从主视频往上找到的播放器；skip：不加按钮的播放器（悬停预览）
+  //   scope：在哪里找控制栏，'root'（默认）= root 里面，'doc' = 整个 document（YouTube 嵌入的控制栏不在播放器元素里）
   //   bars：控制栏右侧，依次取第一个找得到的；before：插在控制栏里含有它的那个子元素前面，依次找，
   //   都没有时 append 为真就加在最后，否则当作控制栏还没好
   //   make：照网站原生按钮的结构造按钮（大小、悬停、全屏变大、焦点框都用网站自己的 CSS）
+  //   rebuild：网站会把控制栏整块删掉再重建时，包着它的那个稳定元素。控制栏不在时不轮询，
+  //   等这个元素里有新节点再放（B 站直播：指针移出播放器就删掉控制区，移入再建）
   //   webFull：网页全屏时视频 closest 能命中的选择器（「网页全屏也算全屏」）
+  //   hideIn：在这个容器里时不显示按钮（B 站小窗）
+  //   tipGap：提示和按钮的距离（按钮框 → px），默认 22×高/40
+  //   panelBelow：控制栏在播放器顶上，设置面板放在按钮下方
   //   panelZ：设置面板 iframe 在 root 里的 z-index（盖过网站自己的控制栏和提示）
   const PLAYER_BARS = Object.freeze({
     bilibili: {
@@ -1123,8 +1139,22 @@
       before: ['.bpx-player-ctrl-setting', '.bpx-player-ctrl-pip', '.bpx-player-ctrl-full'],
       append: true,
       webFull: '.bpx-player-container[data-screen="web"]',
+      hideIn: '.bpx-player-container[data-screen="mini"]',
+      // 原生提示离按钮：普通 19 px、网页全屏 28 px，约为按钮宽度的 0.53
+      tipGap: (b) => Math.round(b.width * 0.53),
       panelZ: 12001,
       make: makeBiliButton
+    },
+    bililive: {
+      root: '#live-player',
+      // 右侧从右往左排（flex 反向）：插在清晰度前面 = 图标组的最左边
+      bars: ['.control-area .right-area'],
+      before: ['.quality-wrap', '.ext-nodes'],
+      append: true,
+      rebuild: '#web-player-controller-wrap-el',
+      // webFull 还没量到（真网站被人机验证挡住）：网页全屏暂时不算全屏
+      panelZ: 2147483000,
+      make: makeBiliLiveButton
     },
     youtube: {
       root: '#movie_player',
@@ -1136,12 +1166,25 @@
       panelZ: 1004,
       make: makeYtButton
     },
+    ytembed: {
+      root: '#movie_player',
+      // 嵌入播放器用的是移动版控制栏（body > #player-controls），右上角是静音、字幕、设置
+      scope: 'doc',
+      bars: ['#player-controls .player-controls-top-right'],
+      before: ['.player-settings-icon'],
+      append: true,
+      panelBelow: true,
+      panelZ: 2147483000,
+      make: makeYtEmbedButton
+    },
     twitch: {
       root: '.video-player',
       bars: ['.player-controls__right-control-group'],
       // class 名每次构建都会变：插在包着设置按钮的那一层前面，结构和 class 运行时照设置按钮抄
       before: ['[data-a-target="player-settings-button"]'],
       append: false,
+      // 原生提示底边离按钮 10 px（按钮 32 px 高时）
+      tipGap: (b) => Math.round(10 * b.height / 32),
       panelZ: 2147483000,
       make: makeTwitchButton
     },
@@ -1152,6 +1195,16 @@
       append: true,
       panelZ: 2147483000,
       make: makeTxpButton
+    },
+    iqiyi: {
+      // 视频和控制层（XPlayer）是两棵并列的子树，root 取同时包着两者的那一层
+      root: '#container1MainContent',
+      // class 名带构建哈希：只用前缀和 data-xplayer-control-key；页头也有个 #right，只认播放控制栏里的
+      bars: ['[class*="defaultController_playCtrl__"] > #right'],
+      before: ['[data-xplayer-control-key="settingBtn"]', '[data-xplayer-control-key="voice"]', '[data-xplayer-control-key="mini"]'],
+      append: true,
+      panelZ: 2147483000,
+      make: makeIqiyiButton
     }
   });
   // 按钮、提示、样式都带这个 class 和 data-rtxhdr-owner=实例标记：新实例清掉旧实例留下的
@@ -1163,6 +1216,8 @@
   // （控制栏整个重建、换了新元素不算）
   const BTN_INSERT_WINDOW_MS = 10000;
   const BTN_INSERT_MAX = 8;
+  // 会整块重建控制栏的网站（rebuild）：每次重建都是新元素，上面的限制管不到，另设总数上限：10 秒内最多插 20 次
+  const BTN_REBUILD_MAX = 20;
   // 放好以后锚点才出现或换了、按钮被挪到锚点后面时挪回去；每次放置最多挪 3 次，不和别的扩展来回抢位置
   const BTN_MOVE_MAX = 3;
   const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -1182,15 +1237,26 @@
     'font-size:12px;font-weight:400;line-height:1.5;';
   const TIP_CSS_YT = TIP_CSS + 'z-index:1003;max-width:300px;padding:5px 9px;' +
     'background-color:rgba(28,28,28,.9);color:#eee;font-size:118%;font-weight:500;line-height:15px;';
+  // Twitch 照它的提示：深色主题下白底黑字（用页面的提示颜色变量），下面带一个指向按钮的小三角
+  const TIP_CSS_TWITCH = TIP_CSS + 'max-width:300px;padding:4px 8px;border-radius:4px;' +
+    'background-color:var(--color-background-tooltip,#fff);color:var(--color-text-tooltip,#0e0e10);' +
+    'font-size:14px;font-weight:600;line-height:1.4;';
+  const TIP_ARROW_CSS = 'position:absolute;display:block;top:100%;width:0;height:0;margin:0;padding:0;' +
+    'border-style:solid;border-width:5px 5px 0;border-color:var(--color-background-tooltip,#fff) transparent transparent;';
+  // 爱奇艺照它的提示，但不用它的 backdrop-filter
+  const TIP_CSS_IQIYI = TIP_CSS + 'max-width:300px;padding:3px 7px;border-radius:4px;' +
+    'background-color:rgba(31,33,40,.9);color:#ccc;font-size:12px;font-weight:400;line-height:16px;';
 
   let btnSite = '';    // 本 frame 的网站（L.playerSite）；空 = 不加按钮
-  // 当前按钮：{el 插进控制栏的元素, btn 可点的元素, icon, dim, tip, tipHost, txpTip,
+  // 当前按钮：{el 插进控制栏的元素, btn 可点的元素, icon, dim, tip, tipHost, tipText 写提示文字的元素（缺省为 tip）, tipArrow, txpTip,
   //   bar, root, video, site, anchor 放在它前面（null = 加在最后）, moves 放好后挪过几次, sig, tipOn}
   let pbtn = null;
   let btnWait = null;  // 控制栏还没出现：{video, href, since, until}；until 为 -1 表示已放弃，等导航或换主视频
   let btnRetryTimer = 0;
   let btnRaf = 0;
   let btnInserts = new WeakMap(); // 控制栏元素 → 最近往里插按钮的时间
+  let btnRebuilds = [];  // rebuild 网站最近插按钮的时间
+  let btnWatch = null;   // rebuild 网站：包着控制栏的稳定元素（控制栏不在时等它里面出现新节点）
   let btnStyle = null;
   let btnSeq = 0;
   let btnSpace = false;
@@ -1219,7 +1285,7 @@
   const PANEL_PLACE_GRACE_MS = 1500;
   // 当前面板：{frame, root, nonce, port, verified, registered, live 登记处于启用（只在显示期间）, shown, pinned 固定（不随离开收起）,
   //   want 等加载好再打开 {via, focus}, h 面板报告的高度, x, y, w, hh, z, overBtn, overFrame, hold, sig, css, styleAttr,
-  //   rootSig, btnOff 按钮离播放器右下角的距离, obscured,
+  //   rootSig, btnOff 按钮离播放器右下角的距离, obscured, orphan 按钮随控制区被删、面板留着时的 {site, video},
   //   wokeAt, placeFailAt 从什么时候起放不下, helloTimer, leaveTimer, destroyTimer, placeTimer}
   let pnl = null;
   let hoverTimer = 0;
@@ -1235,11 +1301,12 @@
         removeBtnStyle();
       }
       btnWait = null; // 规则里再打开时从头找（之前放弃等待的也重新等）
+      btnWatch = null;
       return;
     }
     // 按钮被网站拿掉了（控制栏重建、子元素换掉）：先丢掉，下面重新放。
     // 等控制栏期间 pbtn 为空，页面的 DOM 变化不会再触发重查
-    if (pbtn && !buttonPlaced()) removeButton();
+    if (pbtn && !buttonPlaced()) removeButton(!!site.rebuild);
     const v = primary && primary.isConnected ? primary : null;
     const root = v && !(site.skip && v.closest(site.skip)) ? v.closest(site.root) : null;
     if (!root) {
@@ -1247,7 +1314,7 @@
       renderButton();
       return;
     }
-    if (pbtn && root.contains(pbtn.bar)) {
+    if (pbtn && scopeOf(site, root).contains(pbtn.bar)) {
       pbtn.video = v;
       keepInPlace(site);
       renderButton();
@@ -1256,6 +1323,11 @@
     placeButton(site, v, root);
   }
   const syncButton = guard(syncButtonNow);
+
+  // 找控制栏的范围：默认在播放器 root 里，scope 为 'doc' 时整个 document
+  function scopeOf(site, root) {
+    return site.scope === 'doc' ? document : root;
+  }
 
   // 网站后来才把原生按钮填进控制栏（按钮先加在了最后）、换了锚点元素、或者把按钮挪到了锚点后面：
   // 挪回锚点前面。别的扩展插在按钮和锚点之间不算错位
@@ -1283,15 +1355,25 @@
   function placeButton(site, v, root) {
     const href = location.href;
     if (btnWait && btnWait.video === v && btnWait.href === href && btnWait.until < 0) return;
+    const scope = scopeOf(site, root);
     let bar = null;
-    for (let i = 0; i < site.bars.length && !bar; i++) bar = root.querySelector(site.bars[i]);
+    for (let i = 0; i < site.bars.length && !bar; i++) bar = scope.querySelector(site.bars[i]);
     const anchor = bar ? anchorIn(bar, site.before) : null;
+    // 会整块重建控制栏的网站：控制栏不在（指针不在播放器上）时不轮询、不放弃，等包着它的稳定元素里出现新节点（onDomMutations）
+    btnWatch = site.rebuild ? scope.querySelector(site.rebuild) : null;
+    if (!bar && btnWatch) {
+      clearTimeout(btnRetryTimer);
+      btnRetryTimer = 0;
+      btnWait = null;
+      return;
+    }
     // 控制栏可能还空着、正在填充（B 站实测）：先等锚点出现，等了 BTN_APPEND_MS 还没有（网站改版）才加在最后
     if (!bar || (!anchor && (!site.append || !waitedFor(v, href, BTN_APPEND_MS)))) {
       waitForBar(v, href);
       return;
     }
     removeButton();
+    if (site.rebuild && !rebuildAllowed()) return; // 下一次重建再试
     if (!insertAllowed(bar)) {
       btnWait = { video: v, href: href, since: Date.now(), until: -1 };
       return;
@@ -1374,21 +1456,34 @@
     return true;
   }
 
+  // rebuild 网站：10 秒内往重建出来的控制栏里插按钮不超过 BTN_REBUILD_MAX 次（网站病态地反复重建时停手）
+  function rebuildAllowed() {
+    const now = Date.now();
+    btnRebuilds = btnRebuilds.filter((t) => now - t < BTN_INSERT_WINDOW_MS);
+    if (btnRebuilds.length >= BTN_REBUILD_MAX) return false;
+    btnRebuilds.push(now);
+    return true;
+  }
+
   // SPA 导航、播放器重建、往返缓存恢复：重新找控制栏（之前 15 秒没找到的也重新等）
   function kickButton() {
     btnWait = null;
     btnInserts = new WeakMap();
+    btnRebuilds = [];
     if (btnSite || pbtn) scheduleEvaluate();
   }
 
-  function removeButton() {
+  // keepPanel：网站整块删掉了控制区（rebuild 网站）。打开着的面板留在原处（位置按 btnOff 推算），
+  // 控制区重建、新按钮放进同一个 root 后接回去；收起以后再拆
+  function removeButton(keepPanel) {
     clearTimeout(btnRetryTimer);
     btnRetryTimer = 0;
     const p = pbtn;
     if (!p) return;
     pbtn = null;
     // 面板挂在这个按钮的播放器上：一起拆掉（不挪动 iframe，下次悬停在新的 root 上重建）
-    destroyPanel();
+    if (keepPanel && pnl && pnl.shown && pnl.root === p.root && pnl.frame.isConnected) pnl.orphan = { site: p.site, video: p.video };
+    else destroyPanel();
     // 按钮被移除：按住的手势作废，从按钮开始的对比结束（可能在 evaluate 里，不重新求值）
     holdReset();
     if (peek && (peek.source === 'button' || peek.source === 'key')) {
@@ -1409,13 +1504,15 @@
     }
   }
 
-  // B 站小窗（data-screen="mini"）不显示按钮：用一条样式规则，切换时立即生效（面板的内联样式盖过它，由 panelListen 的观察器收起）
+  // 条目的 hideIn 里不显示按钮（B 站小窗 data-screen="mini"）：用一条样式规则，切换时立即生效
+  // （面板的内联样式盖过它，由 panelListen 的观察器收起）
   function ensureBtnStyle() {
-    if (btnSite !== 'bilibili' || (btnStyle && btnStyle.isConnected)) return;
+    const site = PLAYER_BARS[btnSite];
+    if (!site || !site.hideIn || (btnStyle && btnStyle.isConnected)) return;
     const el = document.createElement('style');
     el.className = BTN_CLASS + '-style';
     el.setAttribute('data-rtxhdr-owner', TOKEN);
-    el.textContent = '.bpx-player-container[data-screen="mini"] .' + BTN_CLASS + '{display:none !important}';
+    el.textContent = site.hideIn + ' .' + BTN_CLASS + '{display:none !important}';
     (document.head || document.documentElement).appendChild(el);
     btnStyle = el;
   }
@@ -1459,7 +1556,7 @@
       p.dim.style.cursor = drm ? 'default' : '';
     }
     if (p.tip) {
-      p.tip.textContent = text;
+      (p.tipText || p.tip).textContent = text;
       if (p.tipOn) placeTip(p);
     } else if (p.txpTip) {
       p.txpTip.textContent = text;
@@ -1646,8 +1743,8 @@
     p.tip.style.display = 'none';
   }
 
-  // 提示在按钮正上方居中，左右不超出播放器；和按钮的距离照原生提示
-  // （B 站普通 19 px、网页全屏 28 px，约为按钮宽度的 0.53；YouTube 22 px，按钮变大时按比例放大）
+  // 提示在按钮正上方居中，左右不超出播放器；和按钮的距离照原生提示（条目的 tipGap）。
+  // 有小三角时三角对准按钮中间
   function placeTip(p) {
     const tip = p.tip;
     const b = p.btn.getBoundingClientRect();
@@ -1656,10 +1753,17 @@
     const o = host ? host.getBoundingClientRect() : { left: 0, top: 0 };
     const w = tip.offsetWidth;
     const h = tip.offsetHeight;
-    const gap = p.site === 'bilibili' ? Math.round(b.width * 0.53) : Math.round(22 * b.height / 40);
+    const gap = tipGapOf(p, b);
     const x = Math.max(c.left + 4, Math.min(b.left + (b.width - w) / 2, c.right - 4 - w));
     tip.style.left = Math.round(x - o.left) + 'px';
     tip.style.top = Math.round(b.top - gap - h - o.top) + 'px';
+    if (p.tipArrow) p.tipArrow.style.left = Math.round(Math.max(4, Math.min(b.left + b.width / 2 - x - 5, w - 14))) + 'px';
+  }
+
+  // 提示、面板和按钮的距离：条目的 tipGap，默认 YouTube 的 22 px（按钮 40 px 高时，变大时按比例放大）
+  function tipGapOf(p, b) {
+    const site = PLAYER_BARS[p.site];
+    return site && site.tipGap ? site.tipGap(b) : Math.round(22 * b.height / 40);
   }
 
   // ---------- 播放器内设置面板 ----------
@@ -1690,7 +1794,7 @@
 
   // 面板作用于按钮所在播放器的视频
   function panelVideo() {
-    const v = pbtn && pbtn.video;
+    const v = pbtn ? pbtn.video : pnl && pnl.orphan ? pnl.orphan.video : null;
     return v && v.isConnected && videos.has(v) ? v : null;
   }
 
@@ -1769,13 +1873,14 @@
       frame: f, root: p.root, nonce: nonce, port: null, verified: false, registered: false, live: false,
       shown: false, pinned: false, want: null, h: 0, x: 0, y: 0, w: PANEL_INIT_W, hh: PANEL_INIT_H, z: site.panelZ || 2147483000,
       overBtn: false, overFrame: false, hold: false, sig: '', css: '', styleAttr: '', rootSig: '', obscured: 0,
-      wokeAt: 0, btnOff: null, placeFailAt: 0, helloTimer: 0, leaveTimer: 0, destroyTimer: 0, placeTimer: 0
+      orphan: null, wokeAt: 0, btnOff: null, placeFailAt: 0, helloTimer: 0, leaveTimer: 0, destroyTimer: 0, placeTimer: 0
     };
     pnl = q;
     panelCss(q);
     f.addEventListener('pointerenter', onPanelFrameEnter);
     f.addEventListener('pointerleave', onPanelFrameLeave);
-    p.root.appendChild(f);
+    // 控制栏在播放器外面（scope 'doc'，YouTube 嵌入）：网站的控制层盖在播放器上，面板挂到 body 才能在它上面；位置仍按 root 算
+    (site.scope === 'doc' && document.body ? document.body : p.root).appendChild(f);
     // 预载了却一直没打开（指针只是扫过按钮）的 iframe 也按时销毁
     schedulePanelExpire(q);
     // 地址不写进 src 属性（网页读得到属性，读得到就能自己嵌一份），而是把空白 iframe 导航过去：跨源以后网页读不到它的地址。
@@ -2084,14 +2189,14 @@
     if (pnl && pnl.want && pnl.want.via === 'hover') pnl.want = null;
   }
 
-  // 面板放在按钮正上方，夹在播放器里（位置同 tip）；高度取面板报告的，放不下时面板内部滚动。
-  // 播放器太小（窄于 260 或按钮上方放不下 160 高）时不打开
+  // 面板放在按钮正上方（条目有 panelBelow 时放在正下方），夹在播放器里（位置同 tip）；高度取面板报告的，放不下时面板内部滚动。
+  // 播放器太小（窄于 260 或按钮上方、下方放不下 160 高）时不打开
   function placePanel(q) {
-    const p = pbtn;
+    const p = pbtn || q.orphan;
     if (!p || !q.frame.isConnected) return false;
-    let b = p.btn.getBoundingClientRect();
+    let b = pbtn ? pbtn.btn.getBoundingClientRect() : null;
     const c = q.root.getBoundingClientRect();
-    if (b.width > 0 && b.height > 0) {
+    if (b && b.width > 0 && b.height > 0) {
       q.btnOff = { r: c.right - b.left, bt: c.bottom - b.top, w: b.width, h: b.height };
     } else if (q.btnOff) {
       // 控制栏自动隐藏时按钮没有尺寸（进出全屏时常见）：按上次按钮离播放器右下角的距离推算
@@ -2101,9 +2206,10 @@
     }
     const w = L.panelWidth(c.width);
     if (!w) return false;
-    const gap = p.site === 'bilibili' ? Math.round(b.width * 0.53) : Math.round(22 * b.height / 40);
+    const gap = tipGapOf(p, b);
     const want = q.h || PANEL_INIT_H;
-    const pos = L.placeAbove(b, c, w, want, gap, PANEL_MARGIN);
+    const site = PLAYER_BARS[p.site];
+    const pos = (site && site.panelBelow ? L.placeBelow : L.placeAbove)(b, c, w, want, gap, PANEL_MARGIN);
     if (!pos || pos.h < Math.min(L.PANEL_MIN_H, want)) return false;
     const op = q.frame.offsetParent;
     const o = op ? op.getBoundingClientRect() : c;
@@ -2132,10 +2238,13 @@
   function syncPanelNow() {
     const q = pnl;
     if (!q) return;
-    if (!pbtn || pbtn.root !== q.root || !q.frame.isConnected || panelMode() === 'off') {
+    // 按钮随控制区被删（orphan）：打开着就留着，等新按钮
+    const orphan = !pbtn && q.orphan && q.shown && q.root.isConnected;
+    if ((pbtn ? pbtn.root !== q.root : !orphan) || !q.frame.isConnected || panelMode() === 'off') {
       destroyPanel();
       return;
     }
+    if (pbtn) q.orphan = null; // 控制区重建、新按钮放回了同一个 root：接回去
     if (q.verified && q.port) {
       const st = panelSnapshot();
       const sig = JSON.stringify(st);
@@ -2421,9 +2530,53 @@
     return { el: b, btn: b, icon: icon, dim: null, tip: tip, tipHost: root };
   }
 
+  // B 站直播：照右侧原生图标按钮抄结构和 class（带 svelte 哈希，每次构建会变）：div.tip-wrap > div > span.icon > svg；
+  // 提示放在按钮里（原生提示由它自己的组件管，插进来的按钮没有）
+  function makeBiliLiveButton(bar) {
+    let ref = null;
+    for (let k = bar.firstElementChild; k && !ref; k = k.nextElementSibling) {
+      if (!isOwnNode(k) && k.querySelector(':scope > div > span.icon > svg')) ref = k;
+    }
+    if (!ref) return null;
+    const refBox = ref.firstElementChild;
+    const refSpan = refBox.firstElementChild;
+    const refSvg = refSpan.querySelector('svg');
+    const b = document.createElement('div');
+    b.className = ref.className;
+    b.setAttribute('role', 'button');
+    b.tabIndex = 0;
+    const box = document.createElement('div');
+    box.className = refBox.className;
+    const span = document.createElement('span');
+    span.className = refSpan.className;
+    const icon = makeIcon(refSvg.getAttribute('width') || '24', refSvg.getAttribute('height') || '24', '0 0 24 24');
+    span.appendChild(icon.svg);
+    box.appendChild(span);
+    const tip = document.createElement('div');
+    tip.style.cssText = TIP_CSS_BILI;
+    b.append(box, tip);
+    return { el: b, btn: b, icon: icon, dim: span, tip: tip, tipHost: b };
+  }
+
+  // YouTube 嵌入：右上角 div > button.icon-button > 图标（和设置按钮同一层结构）；提示和静音、字幕按钮一样用 title
+  function makeYtEmbedButton(bar, anchor) {
+    const ref = anchor && anchor.querySelector('.player-settings-icon svg');
+    const w = (ref && ref.getAttribute('width')) || '24';
+    const b = document.createElement('button');
+    b.className = 'icon-button';
+    b.type = 'button';
+    const icon = makeIcon(w, (ref && ref.getAttribute('height')) || w, '0 0 24 24');
+    icon.svg.style.cssText = 'display:block';
+    b.appendChild(icon.svg);
+    const el = document.createElement('div');
+    if (anchor) el.className = anchor.className;
+    el.appendChild(b);
+    return { el: el, btn: b, icon: icon, dim: icon.svg, tip: null };
+  }
+
   // Twitch：照设置按钮抄结构和 class：InjectLayout > ScLayoutCssVars > button > ButtonIconFigure > ScSvgWrapper > svg
-  // （和影院模式、全屏按钮的结构一样）；提示用 title（Twitch 的提示是 React 弹层）
-  function makeTwitchButton(bar, anchor) {
+  // （和影院模式、全屏按钮的结构一样）；提示照原生提示自己画（原生的是 React 弹层，插进来的按钮没有），挂在 root 里
+  function makeTwitchButton(bar, anchor, root) {
     const ref = anchor && anchor.querySelector('[data-a-target="player-settings-button"]');
     if (!ref) return null;
     const refSvg = ref.querySelector('svg');
@@ -2446,7 +2599,13 @@
       w.appendChild(outer);
       outer = w;
     }
-    return { el: outer, btn: b, icon: icon, dim: icon.svg, tip: null };
+    const tip = document.createElement('div');
+    tip.style.cssText = TIP_CSS_TWITCH;
+    const tipText = document.createElement('span');
+    const tipArrow = document.createElement('span');
+    tipArrow.style.cssText = TIP_ARROW_CSS;
+    tip.append(tipText, tipArrow);
+    return { el: outer, btn: b, icon: icon, dim: icon.svg, tip: tip, tipHost: root, tipText: tipText, tipArrow: tipArrow };
   }
 
   // 腾讯视频：div.txp_btn > svg.txp_icon + div.txp_tooltip（悬停时由腾讯自己的 CSS 显示提示）
@@ -2466,9 +2625,40 @@
     return { el: b, btn: b, icon: icon, dim: icon.svg, tip: null, txpTip: tip };
   }
 
+  // 爱奇艺：外层 div > 按钮 div > 图标。原生按钮的 class 带构建哈希、图标也由它决定（CSS mask），不抄：
+  // 按钮大小照锚点里的原生按钮，外边距由控制栏给每个子元素的样式管；提示自己画，挂在 root 里
+  function makeIqiyiButton(bar, anchor, root) {
+    const refIcon = (anchor || bar).querySelector('#icon');
+    const ref = refIcon && refIcon.parentElement;
+    if (!ref) return null;
+    const rs = getComputedStyle(ref);
+    const is = getComputedStyle(refIcon);
+    const b = document.createElement('div');
+    b.setAttribute('role', 'button');
+    b.tabIndex = 0;
+    b.style.cssText = 'display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;' +
+      'width:' + rs.width + ';height:' + rs.height;
+    const box = document.createElement('div');
+    box.style.cssText = 'display:flex;opacity:' + is.opacity;
+    const w = parseFloat(is.width) > 0 ? String(Math.round(parseFloat(is.width))) : '24';
+    const icon = makeIcon(w, w, '0 0 24 24');
+    box.appendChild(icon.svg);
+    b.appendChild(box);
+    const el = document.createElement('div');
+    el.appendChild(b);
+    const tip = document.createElement('div');
+    tip.style.cssText = TIP_CSS_IQIYI;
+    return { el: el, btn: b, icon: icon, dim: icon.svg, tip: tip, tipHost: root };
+  }
+
   const onBtnLost = guard(function () {
     btnRaf = 0;
     if (pbtn && !pbtn.el.isConnected) evaluate(false);
+  });
+
+  const onBarRebuilt = guard(function () {
+    btnRaf = 0;
+    if (!pbtn) syncButtonNow();
   });
 
   // ---------- 护眼计时 ----------

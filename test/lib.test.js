@@ -105,15 +105,27 @@ test('playerSite: 有控制栏按钮的网站（按 frame 自己的完整域名�
   assert.equal(L.playerSite('www.twitch.tv', '/somechannel'), 'twitch');
   assert.equal(L.playerSite('twitch.tv', '/videos/1'), 'twitch');
   assert.equal(L.playerSite('v.qq.com', '/x/cover/mzc00200abc/x0045xyz.html'), 'tencent');
+  assert.equal(L.playerSite('live.bilibili.com', '/23929781'), 'bililive', 'B 站直播间');
+  assert.equal(L.playerSite('live.bilibili.com', '/blanc/23929781'), 'bililive', '直播间里的 /blanc/ 播放器 iframe');
+  assert.equal(L.playerSite('www.iqiyi.com', '/v_11u444okst0.html'), 'iqiyi');
 });
 
-test('playerSite: 嵌入播放器、直播、其他网站不加按钮', () => {
-  assert.equal(L.playerSite('www.youtube.com', '/embed/dQw4w9WgXcQ'), null);
-  assert.equal(L.playerSite('www.youtube.com', '/EMBED/x'), null);
-  assert.equal(L.playerSite('www.youtube.com', '/embed'), null);
-  assert.equal(L.playerSite('www.youtube.com', '/embedded-page'), 'youtube', '只排除 /embed/ 这一段');
-  for (const h of ['www.youtube-nocookie.com', 'm.youtube.com', 'music.youtube.com', 'live.bilibili.com', 'm.bilibili.com',
-    'space.bilibili.com', 'www.iqiyi.com', 'm.v.qq.com', 'player.twitch.tv', 'clips.twitch.tv', 'example.com', '', null, undefined]) {
+test('playerSite: YouTube 嵌入播放器是单独的网站（ytembed），按路径区分', () => {
+  assert.equal(L.playerSite('www.youtube.com', '/embed/dQw4w9WgXcQ'), 'ytembed');
+  assert.equal(L.playerSite('www.youtube.com', '/EMBED/x'), 'ytembed');
+  assert.equal(L.playerSite('www.youtube.com', '/embed'), 'ytembed');
+  assert.equal(L.playerSite('youtube.com', '/embed/x'), 'ytembed');
+  assert.equal(L.playerSite('www.youtube.com', '/embedded-page'), 'youtube', '只认 /embed 这一段');
+  assert.equal(L.playerSite('www.youtube-nocookie.com', '/embed/dQw4w9WgXcQ'), 'ytembed');
+  assert.equal(L.playerSite('youtube-nocookie.com', '/embed/x'), 'ytembed');
+  assert.equal(L.playerSite('www.youtube-nocookie.com', '/'), null, 'youtube-nocookie.com 只有嵌入播放器');
+  assert.equal(L.playerSite('www.youtube-nocookie.com', '/watch'), null);
+  assert.equal(L.playerSite('www.youtube-nocookie.com'), null);
+});
+
+test('playerSite: 其他网站不加按钮', () => {
+  for (const h of ['m.youtube.com', 'music.youtube.com', 'm.bilibili.com', 'space.bilibili.com', 'live.bilibili.com.evil.example',
+    'iqiyi.com', 'm.iqiyi.com', 'www.iq.com', 'm.v.qq.com', 'player.twitch.tv', 'clips.twitch.tv', 'example.com', '', null, undefined]) {
     assert.equal(L.playerSite(h, '/'), null, String(h));
   }
   // 只认完整域名，不按后缀或子串
@@ -127,9 +139,54 @@ test('playerSite 认得的每个网站在 content.js 的 PLAYER_BARS 里都有�
   const m = /const PLAYER_BARS = Object\.freeze\(\{([\s\S]*?)\n {2}\}\);/.exec(src);
   assert.ok(m, '找到 PLAYER_BARS');
   const keys = Array.from(m[1].matchAll(/^ {4}(\w+): \{/gm), (x) => x[1]).sort();
-  const sites = new Set([['www.bilibili.com', '/video/x'], ['player.bilibili.com', '/player.html'], ['www.youtube.com', '/watch'],
-    ['www.twitch.tv', '/x'], ['v.qq.com', '/x/cover/a/b.html']].map(([h, p]) => L.playerSite(h, p)));
+  const sites = new Set([['www.bilibili.com', '/video/x'], ['player.bilibili.com', '/player.html'], ['live.bilibili.com', '/1'],
+    ['www.youtube.com', '/watch'], ['www.youtube.com', '/embed/x'], ['www.youtube-nocookie.com', '/embed/x'],
+    ['www.twitch.tv', '/x'], ['v.qq.com', '/x/cover/a/b.html'], ['www.iqiyi.com', '/v_x.html']].map(([h, p]) => L.playerSite(h, p)));
   assert.deepEqual(keys, Array.from(sites).sort());
+  assert.deepEqual(keys, Array.from(new Set(Object.values(L.PLAYER_HOSTS))).sort(), 'PLAYER_HOSTS 的每个网站都有条目');
+});
+
+test('PLAYER_BARS 每个条目：root、bars、before、append、make 齐全，make 函数存在，可选字段类型正确', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+  const m = /const PLAYER_BARS = Object\.freeze\(\{([\s\S]*?)\n {2}\}\);/.exec(src);
+  const entries = m[1].split(/\n {4}(?=\w+: \{)/).filter((x) => /^\w+: \{/.test(x));
+  assert.ok(entries.length >= 7, String(entries.length));
+  const bars = {};
+  for (const e of entries) {
+    const name = /^(\w+):/.exec(e)[1];
+    bars[name] = e;
+    assert.ok(/\n {6}root: '[^']+',/.test(e), name + ' root');
+    assert.ok(/\n {6}bars: \[('[^']+'(, )?)+\],/.test(e), name + ' bars');
+    assert.ok(/\n {6}before: \[('[^']+'(, )?)+\],/.test(e), name + ' before');
+    assert.ok(/\n {6}append: (true|false),/.test(e), name + ' append');
+    const mk = /\n {6}make: (\w+)\n/.exec(e);
+    assert.ok(mk && new RegExp('\\n {2}function ' + mk[1] + '\\(').test(src), name + ' make 函数 ' + (mk && mk[1]));
+    if (/\n {6}scope:/.test(e)) assert.ok(/\n {6}scope: '(root|doc)',/.test(e), name + ' scope');
+    for (const k of ['rebuild', 'webFull', 'hideIn', 'skip']) {
+      if (new RegExp('\\n {6}' + k + ':').test(e)) assert.ok(new RegExp('\\n {6}' + k + ": '[^']+',").test(e), name + ' ' + k + ' 是字符串');
+    }
+    if (/\n {6}tipGap:/.test(e)) assert.ok(/\n {6}tipGap: \(b\) => /.test(e), name + ' tipGap 是函数');
+  }
+  assert.ok(/scope: 'doc'/.test(bars.ytembed), 'YouTube 嵌入在整个 document 里找控制栏');
+  assert.ok(/rebuild: '#web-player-controller-wrap-el'/.test(bars.bililive), 'B 站直播用重建模式');
+  assert.ok(/hideIn: '\.bpx-player-container\[data-screen="mini"\]'/.test(bars.bilibili), 'B 站小窗规则在条目里');
+  assert.ok(!/'bilibili'/.test(fnBody(src, 'ensureBtnStyle')), 'ensureBtnStyle 不再写死 B 站');
+  assert.ok(!/p\.site === 'bilibili' \? Math\.round/.test(src), '提示距离不再写死 B 站');
+});
+
+test('content.js：scope、rebuild 和 Twitch 自绘提示接好了', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+  assert.ok(/scopeOf\(site, root\)\.contains\(pbtn\.bar\)/.test(fnBody(src, 'syncButtonNow')), '已放好的判断按 scope');
+  assert.ok(/scope\.querySelector\(site\.bars\[i\]\)/.test(fnBody(src, 'placeButton')), '在 scope 里找控制栏');
+  assert.ok(/btnWatch = site\.rebuild \? scope\.querySelector\(site\.rebuild\) : null;/.test(fnBody(src, 'placeButton')));
+  assert.ok(/rebuildAllowed\(\)/.test(fnBody(src, 'placeButton')), '重建模式有总数上限');
+  const mut = fnBody(src, 'onDomMutations');
+  assert.ok(/btnWatch && !pbtn && !btnRaf/.test(mut) && /btnWatch\.contains\(records\[r\]\.target\)/.test(mut), '等按钮期间只看新增节点在不在稳定元素里');
+  const tw = fnBody(src, 'makeTwitchButton');
+  assert.ok(/TIP_CSS_TWITCH/.test(tw) && /tipHost: root/.test(tw), 'Twitch 自绘提示挂在 root 里');
+  assert.ok(/\(p\.tipText \|\| p\.tip\)\.textContent = text/.test(fnBody(src, 'renderButton')), '写提示文字不冲掉小三角');
+  const css = ['TIP_CSS_TWITCH', 'TIP_ARROW_CSS', 'TIP_CSS_IQIYI'].map((k) => new RegExp('const ' + k + ' = [\\s\\S]*?;\\n').exec(src)[0]).join('');
+  assert.ok(!/backdrop-filter|filter:(?!none)|transform:(?!none)|transition/.test(css), '盖在视频上的提示不用 backdrop-filter、filter、transform、过渡');
 });
 
 // ---------- decide ----------
@@ -2094,10 +2151,53 @@ test('placeAbove：按钮上方居中、左右夹边、空间不足时缩小高�
 
 test('PLAYER_HOSTS 与 playerSite 一致', () => {
   assert.ok(Object.isFrozen(L.PLAYER_HOSTS));
-  for (const [h, site] of Object.entries(L.PLAYER_HOSTS)) assert.equal(L.playerSite(h, '/watch'), site, h);
-  assert.deepEqual(Array.from(new Set(Object.values(L.PLAYER_HOSTS))).sort(), ['bilibili', 'tencent', 'twitch', 'youtube']);
-  assert.equal(L.playerSite('www.youtube.com', '/embed/x'), null, '嵌入播放器仍然排除');
+  for (const [h, site] of Object.entries(L.PLAYER_HOSTS)) {
+    assert.equal(L.playerSite(h, site === 'ytembed' ? '/embed/x' : '/watch'), site, h);
+    assert.equal(L.isPlayerHost(h), true, h);
+    assert.equal(L.isPlayerHost(' ' + h.toUpperCase() + '. '), true, h);
+  }
+  assert.deepEqual(Array.from(new Set(Object.values(L.PLAYER_HOSTS))).sort(), ['bilibili', 'bililive', 'iqiyi', 'tencent', 'twitch', 'youtube', 'ytembed']);
+  assert.equal(L.playerSite('www.youtube.com', '/embed/x'), 'ytembed', '嵌入播放器单独一个网站');
   assert.equal(L.playerSite('toString'), null, '原型上的键不算');
+  for (const h of ['toString', 'm.youtube.com', 'www.bilibili.com.evil.example', '', null, undefined]) assert.equal(L.isPlayerHost(h), false, String(h));
+});
+
+test('placeBelow：按钮正下方居中、左右夹边、空间不足时缩小高度（YouTube 嵌入的右上角）', () => {
+  const root = { left: 0, top: 0, width: 960, height: 540 };
+  const btn = { left: 840, top: 0, width: 48, height: 48 };
+  assert.deepEqual(L.placeBelow(btn, root, 320, 377, 26, 8), { x: 632, y: 74, h: 377 }, '右边夹到 960 - 8 - 320');
+  assert.deepEqual(L.placeBelow({ left: 10, top: 0, width: 48, height: 48 }, root, 320, 200, 26, 8), { x: 8, y: 74, h: 200 }, '左边夹到 8');
+  assert.deepEqual(L.placeBelow(btn, root, 320, 600, 26, 8), { x: 632, y: 74, h: 458 }, '高度夹到按钮下方的可用空间');
+  assert.deepEqual(L.placeBelow(btn, { left: 100, top: 50, width: 960, height: 540 }, 320, 600, 26, 8), { x: 704, y: 74, h: 508 }, '按钮居中，没碰到边');
+  assert.deepEqual(L.placeBelow({ left: 840, top: 520, width: 48, height: 48 }, root, 320, 200, 26, 8).h, 0, '下方没有空间');
+  assert.equal(L.placeBelow(null, root, 320, 200, 26, 8), null);
+  assert.equal(L.placeBelow(btn, root, 0, 200, 26, 8), null);
+  assert.equal(L.placeBelow(btn, root, 320, -1, 26, 8), null);
+  assert.equal(L.placeBelow({ left: 'x', top: 0, width: 1, height: 1 }, root, 1, 1, 0, 0), null);
+  // 同样的按钮和 root，placeAbove 的结果不变（共用的 placeRect 重构）
+  assert.deepEqual(L.placeAbove({ left: 380, top: 400, width: 40, height: 40 }, { left: 0, top: 0, width: 800, height: 450 }, 320, 200, 22, 8), { x: 240, y: 178, h: 200 });
+});
+
+test('content.js：panelBelow 的条目面板放在按钮下方；scope 为 doc 时面板挂在 body', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+  assert.ok(/site && site\.panelBelow \? L\.placeBelow : L\.placeAbove/.test(fnBody(src, 'placePanel')));
+  assert.ok(/\(site\.scope === 'doc' && document\.body \? document\.body : p\.root\)\.appendChild\(f\)/.test(fnBody(src, 'ensurePanelFrame')));
+  const m = /\n {4}ytembed: \{([\s\S]*?)\n {4}\},/.exec(src);
+  assert.ok(m && /\n {6}panelBelow: true,/.test(m[1]), 'YouTube 嵌入：控制栏在顶上');
+});
+
+test('面板嵌在第三方网页里（上层有非播放器网站）：写入要过 IOv2 isVisible；rebuild 网站删控制区时不拆打开着的面板', () => {
+  const panel = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8');
+  const emb = fnBody(panel, 'embeddedInPlayer');
+  assert.ok(/for \(let i = 1; i < ao\.length; i\+\+\)/.test(emb) && /!L\.isPlayerHost\(a\.hostname\)\) thirdParty = true/.test(emb), '核对所有上层页面');
+  const watch = fnBody(panel, 'watchVisibility');
+  assert.ok(/trackVisibility: true, delay: 100/.test(watch) && /e\.isVisible === true/.test(watch) && /catch \(e\) \{ seen = false; \}/.test(watch));
+  assert.ok(/if \(open && \(!thirdParty \|\| seen\)\) return true;/.test(fnBody(panel, 'act')), 'act 门控');
+  assert.ok(/if \(!embeddedInPlayer\(\)\) return;\n {4}watchVisibility\(\);/.test(fnBody(panel, 'init')));
+  const src = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+  assert.ok(/if \(pbtn && !buttonPlaced\(\)\) removeButton\(!!site\.rebuild\);/.test(fnBody(src, 'syncButtonNow')));
+  assert.ok(/if \(keepPanel && pnl && pnl\.shown && pnl\.root === p\.root && pnl\.frame\.isConnected\) pnl\.orphan = /.test(fnBody(src, 'removeButton')));
+  assert.ok(/const orphan = !pbtn && q\.orphan && q\.shown && q\.root\.isConnected;/.test(fnBody(src, 'syncPanelNow')));
 });
 
 // ---------- 1.3 结构测试 ----------
@@ -2585,7 +2685,7 @@ test('panel.js：只和内容脚本的端口通信，写入只在可信事件里
   assert.ok(!/addEventListener\('message'|onmessage|window\.parent\.postMessage|parent\.postMessage|top\.postMessage/.test(js), '不收也不发 window message');
   assert.ok(/chrome\.tabs\.connect\(tabId, \{ frameId: parent, name: PORT_NAME \}\)/.test(js));
   assert.ok(/post\(\{ type: 'hello', nonce: nonce \}\)/.test(js));
-  assert.ok(/window\.top === window/.test(fnBody(js, 'embeddedInPlayer')) && /L\.playerSite\(/.test(fnBody(js, 'embeddedInPlayer')));
+  assert.ok(/window\.top === window/.test(fnBody(js, 'embeddedInPlayer')) && /L\.isPlayerHost\(/.test(fnBody(js, 'embeddedInPlayer')));
   assert.ok(/if \(!embeddedInPlayer\(\)\) return;/.test(fnBody(js, 'init')));
   // 用户操作的处理函数（click / change / input / pointerdown / keydown）都先看 isTrusted
   const re = /addEventListener\('(click|change|input|pointerdown|keydown)', (?:\(e\) => \{|function \(e\) \{)([\s\S]*?)\n\s*\}\)?;?/g;
@@ -2597,7 +2697,7 @@ test('panel.js：只和内容脚本的端口通信，写入只在可信事件里
   assert.ok(n >= 15, '找到的处理函数太少：' + n);
   // 写入只在面板显示着时发出：收起后焦点留在面板里的按键不算；收起时交出焦点
   const act = fnBody(js, 'act');
-  assert.ok(/if \(!e\.isTrusted\) return false;/.test(act) && /if \(open\) return true;/.test(act) && /renderAll\(\)/.test(act));
+  assert.ok(/if \(!e\.isTrusted\) return false;/.test(act) && /if \(open && \(!thirdParty \|\| seen\)\) return true;/.test(act) && /renderAll\(\)/.test(act));
   assert.ok((js.match(/act\(e\)/g) || []).length >= 18, '写入的处理函数都用 act(e)');
   assert.ok(/document\.activeElement\.blur\(\)/.test(fnBody(js, 'onClose')));
   // 「完整设置」打不开弹窗时带上本标签页，弹窗按 ?tab= 显示那个标签页

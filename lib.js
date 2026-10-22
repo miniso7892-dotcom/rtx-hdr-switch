@@ -619,25 +619,40 @@
   }
 
   // 播放器控制栏里加 HDR 按钮的网站：按视频所在 frame 自己的域名判断（完整域名，不按后缀），
-  // 路径只用来排除 YouTube 嵌入播放器（/embed/ 是另一套控制栏）。
-  // 返回 'bilibili' | 'youtube' | 'twitch' | 'tencent'；其他网站（含 B 站直播、爱奇艺）返回 null。
+  // 路径只用来区分 YouTube 观看页和嵌入播放器（/embed 开头是另一套控制栏）。
+  // 返回 'bilibili' | 'bililive' | 'youtube' | 'ytembed' | 'twitch' | 'tencent' | 'iqiyi'；其他网站返回 null。
   // PLAYER_HOSTS 是完整域名 → 网站的表，面板的 web_accessible_resources 和测试也从它派生
   const PLAYER_HOSTS = Object.freeze({
     'www.bilibili.com': 'bilibili',
     'bilibili.com': 'bilibili',
     'player.bilibili.com': 'bilibili',
+    'live.bilibili.com': 'bililive',
     'www.youtube.com': 'youtube',
     'youtube.com': 'youtube',
+    'www.youtube-nocookie.com': 'ytembed',
+    'youtube-nocookie.com': 'ytembed',
     'www.twitch.tv': 'twitch',
     'twitch.tv': 'twitch',
-    'v.qq.com': 'tencent'
+    'v.qq.com': 'tencent',
+    'www.iqiyi.com': 'iqiyi'
   });
 
+  function playerHostKey(hostname) {
+    return String(hostname == null ? '' : hostname).trim().toLowerCase().replace(/\.$/, '');
+  }
+
   function playerSite(hostname, pathname) {
-    const h = String(hostname == null ? '' : hostname).trim().toLowerCase().replace(/\.$/, '');
+    const h = playerHostKey(hostname);
     const site = hasOwn(PLAYER_HOSTS, h) ? PLAYER_HOSTS[h] : null;
-    if (site === 'youtube' && /^\/embed(?:\/|$)/i.test(String(pathname == null ? '' : pathname))) return null;
-    return site;
+    if (site !== 'youtube' && site !== 'ytembed') return site;
+    const embed = /^\/embed(?:\/|$)/i.test(String(pathname == null ? '' : pathname));
+    if (site === 'youtube') return embed ? 'ytembed' : 'youtube';
+    return embed ? 'ytembed' : null; // youtube-nocookie.com 只有嵌入播放器
+  }
+
+  // 域名在 PLAYER_HOSTS 里（不看路径）：面板 iframe 核对父页面的 origin 用（ancestorOrigins 没有路径）
+  function isPlayerHost(hostname) {
+    return hasOwn(PLAYER_HOSTS, playerHostKey(hostname));
   }
 
   function videoKey(url) {
@@ -954,22 +969,35 @@
     return typeof last.key === 'string' && last.key !== '' && last.key !== key && last.state === state;
   }
 
+  // getBoundingClientRect 的结果 → {left, top, right, bottom, width}；不合法返回 null
+  function placeRect(o) {
+    if (!o || typeof o !== 'object') return null;
+    const left = +o.left, top = +o.top, width = +o.width, height = +o.height;
+    return [left, top, width, height].every(isFinite) ? { left: left, top: top, right: left + width, bottom: top + height, width: width } : null;
+  }
+
   /**
    * 浮层放在按钮正上方：水平居中，左右离 root 边缘至少 margin；高度不超过按钮上方的可用空间。
    * btn / root：{left, top, width, height}（getBoundingClientRect 的结果）；返回 {x, y, h}（视口坐标），参数不合法返回 null
    */
   function placeAbove(btn, root, w, h, gap, margin) {
-    const rect = function (o) {
-      if (!o || typeof o !== 'object') return null;
-      const left = +o.left, top = +o.top, width = +o.width, height = +o.height;
-      return [left, top, width, height].every(isFinite) ? { left: left, top: top, right: left + width, width: width } : null;
-    };
-    const b = rect(btn), c = rect(root);
+    const b = placeRect(btn), c = placeRect(root);
     if (!b || !c || !(w > 0) || !(h > 0)) return null;
     const g = gap > 0 ? gap : 0, m = margin > 0 ? margin : 0;
     const x = Math.max(c.left + m, Math.min(b.left + (b.width - w) / 2, c.right - m - w));
     const hh = Math.min(h, Math.max(0, b.top - g - (c.top + m)));
     return { x: Math.round(x), y: Math.round(b.top - g - hh), h: Math.round(hh) };
+  }
+
+  // 同 placeAbove，但放在按钮正下方（控制栏在播放器顶上时，如 YouTube 嵌入播放器的右上角）：高度不超过按钮下方的可用空间
+  function placeBelow(btn, root, w, h, gap, margin) {
+    const b = placeRect(btn), c = placeRect(root);
+    if (!b || !c || !(w > 0) || !(h > 0)) return null;
+    const g = gap > 0 ? gap : 0, m = margin > 0 ? margin : 0;
+    const x = Math.max(c.left + m, Math.min(b.left + (b.width - w) / 2, c.right - m - w));
+    const y = b.bottom + g;
+    const hh = Math.min(h, Math.max(0, c.bottom - m - y));
+    return { x: Math.round(x), y: Math.round(y), h: Math.round(hh) };
   }
 
   // ---------- 播放器内设置面板 ----------
@@ -2516,6 +2544,7 @@
     toggleAutoMode: toggleAutoMode,
     isTrackingParam: isTrackingParam,
     playerSite: playerSite,
+    isPlayerHost: isPlayerHost,
     videoKey: videoKey,
     inNightWindow: inNightWindow,
     validRule: validRule,
@@ -2569,6 +2598,7 @@
     // 1.3：播放器面板
     PLAYER_HOSTS: PLAYER_HOSTS,
     placeAbove: placeAbove,
+    placeBelow: placeBelow,
     PANEL_MIN_H: PANEL_MIN_H,
     panelWidth: panelWidth,
     panelVideoChoice: panelVideoChoice,
