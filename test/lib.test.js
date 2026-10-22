@@ -2467,12 +2467,244 @@ test('i18n 1.3 P3：开关类选项的中文动词写完整，peek 命令没有�
   }
   for (const lang of ['zh', 'en']) {
     assert.ok(I.t(lang, 'content.peek', { state: 'SDR' }).includes('SDR'));
-    const timed = I.t(lang, 'content.peekTimed', { state: 'HDR', seconds: 5 });
-    assert.ok(timed.includes('HDR') && timed.includes('5'), timed);
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
   assert.ok(manifest.commands.peek && !manifest.commands.peek.suggested_key);
   assert.equal(manifest.commands.peek.description, '__MSG_cmdPeek__');
+});
+
+// ---------- 1.3 P4：播放器内设置面板 ----------
+
+test('panelWidth / panelVideoChoice / panelMatches', () => {
+  assert.equal(L.panelWidth(1280), 320);
+  assert.equal(L.panelWidth(336), 320);
+  assert.equal(L.panelWidth(300), 284, '窄于 336 时用播放器宽度减 16');
+  assert.equal(L.panelWidth(270), 260, '下限 260');
+  assert.equal(L.panelWidth(259), null, '窄于 260 不开面板');
+  assert.equal(L.panelWidth('x'), null);
+  assert.equal(L.panelWidth(Infinity), null);
+  assert.equal(L.PANEL_MIN_H, 160);
+  assert.equal(L.panelVideoChoice({ hasVideo: true, state: 'off', manual: true, saved: 'on' }), 'off', '手动优先');
+  assert.equal(L.panelVideoChoice({ hasVideo: true, state: 'off', manual: false, saved: 'on' }), 'on', '记住的状态');
+  assert.equal(L.panelVideoChoice({ hasVideo: true, state: 'off', reason: 'site', manual: false, saved: null }), 'follow');
+  assert.equal(L.panelVideoChoice({ hasVideo: false, manual: true, state: 'on' }), 'follow');
+  assert.equal(L.panelVideoChoice(null), 'follow');
+  const m = L.panelMatches();
+  assert.equal(m.length, Object.keys(L.PLAYER_HOSTS).length);
+  for (const h of Object.keys(L.PLAYER_HOSTS)) assert.ok(m.includes('https://' + h + '/*'), h);
+  assert.deepEqual(m, m.slice().sort());
+});
+
+test('manifest：面板 panel.html 只对播放器网站开放，用动态网址，引用的文件都存在', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+  assert.deepEqual(manifest.web_accessible_resources, [{ resources: ['panel.html'], matches: L.panelMatches(), use_dynamic_url: true }]);
+  assert.deepEqual(manifest.permissions.slice().sort(), ['alarms', 'nativeMessaging', 'scripting', 'storage'], '不新增权限');
+  const html = fs.readFileSync(path.join(ROOT, 'panel.html'), 'utf8');
+  for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) {
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(m[1])) assert.ok(fs.existsSync(path.join(ROOT, m[1])), '缺少文件 ' + m[1]);
+  }
+  assert.deepEqual(Array.from(html.matchAll(/<script src="([^"]+)"/g), (m) => m[1]), ['i18n.js', 'lib.js', 'ui-kit.js', 'nv-client.js', 'panel.js']);
+  assert.deepEqual(Array.from(html.matchAll(/<link rel="stylesheet" href="([^"]+)"/g), (m) => m[1]), ['fonts/fonts.css', 'ui-base.css', 'panel.css']);
+});
+
+test('panel.html / panel.js：元素 id 都在、控件都有名称、没有原生下拉框、i18n 键都存在', () => {
+  const I = require('../i18n.js');
+  const keys = new Set(Object.keys(I.DICT.zh));
+  const html = fs.readFileSync(path.join(ROOT, 'panel.html'), 'utf8');
+  const js = srcOf('panel.js');
+  const ids = new Set(Array.from(html.matchAll(/\bid="([^"]+)"/g), (m) => m[1]));
+  const used = new Set(Array.from(js.matchAll(/\$\('([^']+)'\)/g), (m) => m[1]));
+  for (const n of ['video', 'nv', 'profiles']) { used.add('tab-' + n); used.add('pane-' + n); }
+  for (const id of used) assert.ok(ids.has(id), '缺少 #' + id);
+  for (const m of html.matchAll(/<(input|select|button)\b([^>]*)>/g)) {
+    const attrs = m[2];
+    const id = (/\bid="([^"]+)"/.exec(attrs) || [])[1];
+    const labelled = /aria-label(ledby)?=/.test(attrs) || (id && html.includes('for="' + id + '"')) || /data-i18n="/.test(attrs);
+    const wrapped = /type="(radio|checkbox)"/.test(attrs);
+    assert.ok(labelled || wrapped, '控件没有名称：' + m[0]);
+  }
+  assert.ok(!/<select\b/.test(html), '面板里不用原生下拉框（列表画在 iframe 外面）');
+  assert.ok(/role="dialog"/.test(html) && /role="tablist"/.test(html));
+  for (const m of html.matchAll(/data-i18n="([^"]+)"/g)) assert.ok(keys.has(m[1]), 'panel.html ' + m[1]);
+  for (const m of html.matchAll(/data-i18n-attr="([^"]+)"/g)) for (const pair of m[1].split(';')) assert.ok(keys.has(pair.split(':')[1]), pair);
+  for (const m of js.matchAll(/\bt\('([a-z][\w.-]*)'\s*[,)]/g)) assert.ok(keys.has(m[1]), 'panel.js ' + m[1]);
+  for (const m of srcOf('content.js').matchAll(/L\.t\(lang, '(panel\.[\w.-]+)'/g)) assert.ok(keys.has(m[1]), 'content.js ' + m[1]);
+  for (const k of ['panel.siteOn', 'panel.siteOff', 'panel.siteFs', 'panel.tabs', 'panel.saveFailed']) {
+    assert.ok(!/(^|[^启闭打])[开关](?![启闭心])/.test(I.DICT.zh[k]), k);
+  }
+});
+
+test('1.3 界面不写多余的次级标签和说明：面板、弹窗新控件、对比和沿用的提示', () => {
+  const I = require('../i18n.js');
+  const html = fs.readFileSync(path.join(ROOT, 'panel.html'), 'utf8');
+  const js = srcOf('panel.js');
+  // 面板：没有副标题行、没有「全局设置」说明、页签已经写了「本视频」，分段按钮上方不再重复
+  for (const id of ['nv-hdr-state', 'nv-vsr-state', 'nv-global', 'v-mode-label', 'site-title']) assert.ok(!html.includes('id="' + id + '"'), id);
+  assert.ok(!/label-stack/.test(html), '面板没有「标签 + 副标题」的组合');
+  assert.equal((html.match(/class="sub"/g) || []).length, 1, '只有大字旁边的原因');
+  // 没有可见标签的分组也有可访问名称；本网站的名称（含域名）由 panel.js 写
+  for (const m of html.matchAll(/<span [^>]*role="radiogroup"[^>]*>/g)) {
+    assert.ok(/aria-label(ledby)?=/.test(m[0]) || /id="site-rule"/.test(m[0]), m[0]);
+  }
+  assert.ok(/U\.setAttr\(\$\('site-rule'\), 'aria-label', t\('panel\.thisSite'/.test(js));
+  assert.ok(!/video\.reason/.test(fnBody(js, 'renderVideo')), '原因不加「原因：」');
+  // 开关下面只在出错或借用时有一行
+  assert.ok(/const note = err \|\| \(lease \? t\('panel\.leased'\) : ''\)/.test(fnBody(js, 'renderNv')));
+  // 删掉的键：中英文都没有了，代码里也不再引用
+  const all = ['panel.js', 'panel.html', 'content.js', 'popup.js', 'popup.html'].map((f) => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n');
+  for (const k of ['panel.global', 'panel.saved', 'content.peekTimed', 'content.tabOfferOn', 'content.tabOfferOff', 'video.forgetDisabled']) {
+    assert.ok(!(k in I.DICT.zh) && !(k in I.DICT.en), k);
+    assert.ok(!all.includes("'" + k + "'") && !all.includes('"' + k + '"'), k + ' 仍被引用');
+  }
+  // 提示里不写附加说明（几秒后恢复、刷新后失效），提议按钮只写一个动作
+  for (const lang of ['zh', 'en']) {
+    for (const k of ['content.tabSetOn', 'content.tabSetOff', 'content.tabOffer', 'cmd.peek', 'panel.tab', 'panel.hostMissing']) {
+      assert.ok(!/[，,（(]|刷新|reload|\d/.test(I.DICT[lang][k]), lang + ' ' + k + '：' + I.DICT[lang][k]);
+    }
+  }
+  assert.ok(/osdBtn\.textContent = L\.t\(lang, 'content\.tabOffer'\)/.test(fnBody(srcOf('content.js'), 'showOffer')));
+  for (const [dir, lang] of [['zh_CN', 'zh'], ['en', 'en']]) {
+    const msgs = JSON.parse(fs.readFileSync(path.join(ROOT, '_locales', dir, 'messages.json'), 'utf8'));
+    assert.equal(msgs.cmdPeek.message, I.DICT[lang]['cmd.peek'], dir);
+  }
+  // 弹窗：面板打开方式三段只写方式本身；网站规则和「没有规则时」的「仅全屏」用同样的短词；不可用的「清除记忆」不再挂说明
+  assert.equal(I.DICT.zh['rules.playerPanel'], '面板打开方式');
+  assert.deepEqual(['rules.panelHover', 'rules.panelRight', 'rules.panelOff'].map((k) => I.DICT.zh[k]), ['悬停', '右键', '关闭']);
+  assert.equal(I.DICT.zh['site.fullscreen'], I.DICT.zh['rules.defaultFullscreen']);
+  assert.ok(!/forget\.title/.test(srcOf('popup.js')));
+});
+
+test('panel.js：只和内容脚本的端口通信，写入只在可信事件里，设置走 settings-patch，HDR 开关和还原走 nv-op', () => {
+  const js = srcOf('panel.js');
+  assert.ok(!/innerHTML|insertAdjacentHTML|document\.write/.test(js), '只用 createElement 建 DOM');
+  assert.ok(!/addEventListener\('message'|onmessage|window\.parent\.postMessage|parent\.postMessage|top\.postMessage/.test(js), '不收也不发 window message');
+  assert.ok(/chrome\.tabs\.connect\(tabId, \{ frameId: parent, name: PORT_NAME \}\)/.test(js));
+  assert.ok(/post\(\{ type: 'hello', nonce: nonce \}\)/.test(js));
+  assert.ok(/window\.top === window/.test(fnBody(js, 'embeddedInPlayer')) && /L\.playerSite\(/.test(fnBody(js, 'embeddedInPlayer')));
+  assert.ok(/if \(!embeddedInPlayer\(\)\) return;/.test(fnBody(js, 'init')));
+  // 用户操作的处理函数（click / change / input / pointerdown / keydown）都先看 isTrusted
+  const re = /addEventListener\('(click|change|input|pointerdown|keydown)', (?:\(e\) => \{|function \(e\) \{)([\s\S]*?)\n\s*\}\)?;?/g;
+  let n = 0;
+  for (const m of js.matchAll(re)) {
+    n++;
+    assert.ok(/e\.isTrusted|act\(e\)/.test(m[2].split('\n').slice(0, 3).join('\n')), m[1] + ' 处理函数没有先检查 isTrusted：' + m[0].slice(0, 120));
+  }
+  assert.ok(n >= 15, '找到的处理函数太少：' + n);
+  // 写入只在面板显示着时发出：收起后焦点留在面板里的按键不算；收起时交出焦点
+  const act = fnBody(js, 'act');
+  assert.ok(/if \(!e\.isTrusted\) return false;/.test(act) && /if \(open\) return true;/.test(act) && /renderAll\(\)/.test(act));
+  assert.ok((js.match(/act\(e\)/g) || []).length >= 18, '写入的处理函数都用 act(e)');
+  assert.ok(/document\.activeElement\.blur\(\)/.test(fnBody(js, 'onClose')));
+  // 「完整设置」打不开弹窗时带上本标签页，弹窗按 ?tab= 显示那个标签页
+  assert.ok(/'\?tab=' \+ ownTab/.test(fnBody(js, 'openFullSettings')));
+  const pop = srcOf('popup.js');
+  assert.ok(pop.includes('/^\\?tab=(\\d{1,10})$/.exec(location.search)') && /chrome\.tabs\.get\(Number\(asked\[1\]\)\)/.test(pop));
+  // 画中画的提示：面板用自己的短句，不带「可能」
+  assert.ok(/t\('panel\.pip'\)/.test(js) && !/'video\.pip'/.test(js));
+  const I = require('../i18n.js');
+  for (const l of ['zh', 'en']) assert.ok(!/可能|约|大概|\bmay\b|\bmight\b/.test(I.DICT[l]['panel.pip']), l);
+  assert.ok(/type: 'settings-patch', patch: patch/.test(fnBody(js, 'patchSettings')));
+  assert.ok(/op: 'set', patch: patch, mode: 'suppress'/.test(fnBody(js, 'setEnabled')), 'HDR 开关走 nv-op suppress');
+  assert.ok(/op: 'set', patch: patch, mode: 'yield'/.test(fnBody(js, 'revert')));
+  assert.ok(/L\.nvRevertPatch\(L\.nvUnleased\(nv\.state, hdrOnlyStatus\)/.test(fnBody(js, 'revertPatch')));
+  assert.ok(/openSnap = L\.nvUnleased\(nv\.state, hdrOnlyStatus\)/.test(fnBody(js, 'nvRefresh')), '打开时的值用借用前的开关');
+  assert.ok(/op: 'apply-preset'/.test(js));
+  assert.ok(!/type: 'hdr-only'/.test(js), '面板不发 hdr-only drop（HDR 开关经 nv-op）');
+  assert.ok(/bridgeSet: \(payload\) => nvOp\(\{ op: 'set'/.test(js), '端口用不了时滑块改走 nv-op');
+  assert.ok(/type: 'profile', op: op/.test(js) && /\$\('tab-profiles'\)\.hidden = !profilesOn/.test(fnBody(js, 'loadProfiles')), '配置档页签看 profile list 有没有回复');
+  const client = srcOf('nv-client.js');
+  assert.ok(/msg\.cmd === 'set' && typeof o\.bridgeSet === 'function'/.test(client));
+});
+
+test('content.js 设置面板：握手、触发方式、可信输入、拆除、样式', () => {
+  const src = srcOf('content.js');
+  assert.ok(/const PANEL_HOVER_MS = 350;/.test(src) && /const PANEL_LEAVE_MS = 400;/.test(src) && /const PANEL_DESTROY_MS = 60000;/.test(src));
+  assert.ok(!/\bpostMessage\(/.test(src.replace(/port\.postMessage\(/g, '')), '和面板之间只用端口');
+  assert.ok(!/addEventListener\('message'/.test(src));
+  // 握手：端口名、本扩展、/panel.html、每个面板只认第一个端口；hello 带 nonce；登记后才发 init。
+  // 面板地址（含 nonce）不写进 src 属性，用 location.replace 导航过去（网页读不到）
+  const conn = fnBody(src, 'onPanelConnect');
+  assert.ok(/port\.name !== PANEL_PORT/.test(conn) && /s\.id !== runtime\.id/.test(conn) && /isPanelUrl\(s\.url\)/.test(conn));
+  assert.ok(/!q \|\| q\.port \|\|/.test(conn));
+  const ens = fnBody(src, 'ensurePanelFrame');
+  assert.ok(!/\.src\s*=|setAttribute\('src'/.test(ens), '不写 src 属性');
+  assert.ok(/f\.contentWindow\.location\.replace\(runtime\.getURL\('panel\.html'\) \+ '#f=' \+ parentFrame \+ '&n=' \+ nonce\)/.test(ens));
+  assert.ok(ens.indexOf('appendChild(f)') < ens.indexOf('location.replace'), '先插入再导航');
+  const pm = fnBody(src, 'onPanelPortMsg');
+  assert.ok(/msg\.nonce !== q\.nonce/.test(pm));
+  assert.ok(pm.indexOf("panelRegister(q, 'add')") < pm.indexOf("type: 'init'"), '先登记再发 init');
+  assert.ok(/if \(!q\.shown\) return;/.test(pm), '面板收起时不接受操作');
+  assert.ok(/type: 'panel-frame', op: op, nonce: q\.nonce/.test(fnBody(src, 'panelRegister')));
+  // 触发方式与可信输入
+  for (const fn of ['onBtnPointerEnter', 'onBtnPointerLeave', 'onBtnContextMenu', 'onBtnKeyDown', 'onPanelOutside', 'onPanelDocKey', 'onPanelFrameEnter', 'onPanelFrameLeave']) {
+    assert.ok(/e\.isTrusted/.test(fnBody(src, fn)), fn + ' 检查 isTrusted');
+  }
+  assert.ok(/panelMode\(\) !== 'hover' \|\| e\.pointerType === 'touch'/.test(fnBody(src, 'onBtnPointerEnter')));
+  assert.ok(/ensurePanelFrame\(\)/.test(fnBody(src, 'onBtnPointerEnter')), '第一次悬停就预载');
+  assert.ok(/cancelHoverOpen\(\)/.test(fnBody(src, 'onBtnPointerDown')), '按下取消悬停打开（单击只切换）');
+  const kd = fnBody(src, 'onBtnKeyDown');
+  assert.ok(/e\.key === 'ArrowUp' \|\| \(e\.key === 'Enter' && e\.shiftKey\)/.test(kd) && /showPanel\('key', true\)/.test(kd));
+  assert.ok(/panelMode\(\) !== 'right'/.test(fnBody(src, 'onBtnContextMenu')));
+  for (const ev of ['pointerenter', 'pointerleave']) assert.ok(src.includes("b.addEventListener('" + ev + "'"), ev);
+  assert.ok(/aria-haspopup', 'dialog'/.test(fnBody(src, 'panelAria')) && /'aria-expanded'/.test(fnBody(src, 'panelAria')));
+  assert.ok(/pnl && pnl\.shown/.test(fnBody(src, 'showTip')), '面板打开时不显示 tip');
+  // 拆除：按钮移除、扩展失效、页面离开；旧实例留下的也清掉
+  assert.ok(/destroyPanel\(\)/.test(fnBody(src, 'removeButton')));
+  assert.ok(/destroyPanel\(\)/.test(fnBody(src, 'onPageHide')));
+  assert.ok(/runtime\.onConnect\.removeListener\(onPanelConnect\)/.test(fnBody(src, 'destroy')));
+  assert.ok(/PANEL_CLASS/.test(fnBody(src, 'removeStaleButtons')) && /PANEL_CLASS/.test(fnBody(src, 'isOwnNode')));
+  assert.ok(/data-screen'\) === 'mini'\) return false;/.test(fnBody(src, 'panelVisibleNow')) &&
+    /panelAttrObserver\.observe\(pnl\.root, \{ attributes: true, attributeFilter: \['data-screen'/.test(src), 'B 站小窗时收起面板');
+  assert.ok(/syncPanel\(\);/.test(fnBody(src, 'evaluate')));
+  // 只切换 visibility；内联样式全部 !important，不用 filter / transform / 过渡（盖在视频上）
+  const css = fnBody(src, 'panelCss');
+  assert.ok(/visibility:' \+ \(q\.shown \? 'visible' : 'hidden'\)/.test(css));
+  for (const decl of css.match(/[a-z-]+:[^;']*;/g) || []) assert.ok(/!important;$/.test(decl), decl);
+  assert.ok(/transform:none !important/.test(css) && /filter:none !important/.test(css) && /transition:none !important/.test(css));
+  assert.ok(!/display:none/.test(css), '不靠 display 切换');
+  // 显示时启用登记、收起时停用；收起时焦点不留在面板里；预载的、收起的 iframe 都按时销毁
+  const rv = fnBody(src, 'revealPanel');
+  assert.ok(rv.indexOf("panelRegister(q, 'open')") > 0 && rv.indexOf("panelRegister(q, 'open')") < rv.lastIndexOf('go()'), '先启用登记再发 open');
+  const hp = fnBody(src, 'hidePanel');
+  assert.ok(/panelRegister\(q, 'close'\)/.test(hp) && /deepElement\('activeElement'\) === q\.frame/.test(hp) && /q\.frame\.blur\(\)/.test(hp));
+  const ens2 = fnBody(src, 'ensurePanelFrame');
+  assert.ok(/schedulePanelExpire\(q\)/.test(ens2) && /schedulePanelExpire\(pnl\)/.test(ens2) && !/clearTimeout\(pnl\.destroyTimer\)/.test(ens2));
+  // 防点击劫持：打点、checkVisibility、祖先的透明度和 filter / mask
+  const ob = fnBody(src, 'checkObscured');
+  assert.ok(/elementFromPoint/.test(ob) && /checkVisibility/.test(ob) && /opacity/.test(ob));
+  assert.ok(/cs\.filter/.test(ob) && /maskImage/.test(ob));
+  assert.ok(/const PANEL_CLASS = BTN_CLASS \+ '-panel';/.test(src));
+  for (const site of ['bilibili', 'youtube', 'twitch', 'tencent']) {
+    assert.ok(new RegExp(site + ': \\{[\\s\\S]*?panelZ: \\d+,[\\s\\S]*?make:').test(src), site + ' 有 panelZ');
+  }
+});
+
+test('background：面板 iframe 的登记只认播放器 frame 的内容脚本，存进 storage.session，没登记的 panel.html 不能改设置', () => {
+  const bg = srcOf('background.js');
+  assert.ok(/msg\.type === 'panel-frame' && !page/.test(bg), '只有内容脚本（不是扩展页面）能登记');
+  const h = (/\nasync function handlePanelFrame\([^)]*\) \{[\s\S]*?\n\}/.exec(bg) || [''])[0];
+  assert.ok(/playerFrameSender\(sender\)/.test(h) && /fid === sender\.frameId/.test(h));
+  assert.ok(/c\.frameIds\.size !== 1/.test(h), '同一个 nonce 有两个 frame 认领时不登记');
+  assert.ok(/msg\.type === 'panel-claim' && !page && panelUrl\(sender\.url\)/.test(bg), '面板用 nonce 认领自己');
+  const claim = (/\nfunction handlePanelClaim\([^)]*\) \{[\s\S]*?\n\}/.exec(bg) || [''])[0];
+  assert.ok(/PANEL_NONCE_RE\.test\(nonce\)/.test(claim) && /e\.nonce === nonce\) return \{ ok: false/.test(claim), '已登记的 nonce 不再认领');
+  assert.ok(/chrome\.storage\.session\.set\(\{ \[PANEL_FRAMES_KEY\]: o \}\)/.test(bg));
+  assert.ok(/if \(!page && panelUrl\(sender\.url\)\) return \{ ok: false, code: 'forbidden' \};/.test(bg));
+  assert.ok(/!panelFramesReady && panelUrl\(sender\.url\)/.test(bg), 'service worker 重启后先读回登记');
+  assert.ok(/if \(panelFrames\.delete\(tabId\)\) persistPanelFrames\(\);/.test(bg), '关闭标签页时注销');
+  // 登记先停用，面板显示期间才启用：收起的面板什么都改不了
+  assert.ok(/m\.set\(fid, \{ nonce: nonce, live: false \}\)/.test(h) && /msg\.op === 'open' \|\| msg\.op === 'close'/.test(h));
+  const fep = (/\nfunction fromExtensionPage\([^)]*\) \{[\s\S]*?\n\}/.exec(bg) || [''])[0];
+  assert.ok(/if \(!reg \|\| !reg\.live \|\|/.test(fep), '只认显示着的面板');
+});
+
+test('弹窗：规则页签有「面板打开方式」三段，控制栏按钮关着时禁用', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
+  const vals = Array.from(html.matchAll(/name="player-panel" value="(\w+)"/g), (m) => m[1]);
+  assert.deepEqual(vals, L.PANEL_MODES.slice());
+  assert.ok(html.indexOf('id="player-button"') < html.indexOf('name="player-panel"'));
+  const js = srcOf('popup.js');
+  assert.ok(/r\.disabled = !s\.playerButton;/.test(js) && /s\.playerPanel = r\.value/.test(js));
 });
 
 // ---------- 运行 ----------

@@ -312,7 +312,6 @@
     btn.classList.toggle('to-hdr', !pending && !on);
     const forget = $('btn-forget');
     forget.disabled = !(st.manual || st.saved || st.tab);
-    forget.title = forget.disabled ? t('video.forgetDisabled') : '';
   }
 
   // NVIDIA 全局 HDR 关着或不可用时，在视频页签顶部说明（逐视频的开关这时不起作用）；
@@ -378,6 +377,11 @@
     setChecked('remember-manual', s.rememberManual);
     setChecked('show-osd', s.osd);
     setChecked('player-button', s.playerButton);
+    // 设置面板挂在控制栏按钮上：按钮关着时这一行不能改
+    for (const r of radios('player-panel')) {
+      r.checked = r.value === s.playerPanel;
+      r.disabled = !s.playerButton;
+    }
     setChecked('hdr-only', s.hdrOnly);
     setChecked('sdr-follow', s.nv.followSdr);
     renderHdrOnlyStatus();
@@ -537,6 +541,9 @@
     onChange('remember-manual', (el) => save((s) => { s.rememberManual = el.checked; }));
     onChange('show-osd', (el) => save((s) => { s.osd = el.checked; }));
     onChange('player-button', (el) => save((s) => { s.playerButton = el.checked; }));
+    for (const r of radios('player-panel')) {
+      r.addEventListener('change', () => { if (r.checked) save((s) => { s.playerPanel = r.value; }); });
+    }
     onChange('hdr-only', (el) => save((s) => { s.hdrOnly = el.checked; }));
     // 停一会儿再保存：background 会马上套用当前时段的预设，键盘浏览途经的预设不应写到显卡上
     onChange('nv-night-preset', (el) => save((s) => { s.nv.nightPresetId = el.value || null; }, NV_DEBOUNCE_MS));
@@ -1080,9 +1087,15 @@
 
   async function init() {
     let tab = null;
+    // 播放器面板的「完整设置」打不开弹窗时会在新标签页里打开这里，带上视频所在的标签页（?tab=id）
+    const asked = /^\?tab=(\d{1,10})$/.exec(location.search);
     try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      tab = tabs && tabs[0];
+      if (asked) {
+        tab = await chrome.tabs.get(Number(asked[1]));
+      } else {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        tab = tabs && tabs[0];
+      }
     } catch (e) { tab = null; }
     tabId = tab && Number.isInteger(tab.id) ? tab.id : null;
     const url = (tab && (tab.url || tab.pendingUrl)) || '';

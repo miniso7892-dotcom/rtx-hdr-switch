@@ -36,7 +36,7 @@
     "description": "快捷键"
   },
   "cmdPeek": {
-    "message": "临时对比 HDR 和 SDR（5 秒后恢复）",
+    "message": "临时对比 HDR 和 SDR",
     "description": "快捷键"
   },
   "cmdNextProfile": {

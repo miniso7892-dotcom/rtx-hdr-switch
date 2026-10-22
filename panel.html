@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="dark">
+  <title data-i18n="panel.title">RTX HDR 设置</title>
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="stylesheet" href="ui-base.css">
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <!-- 嵌在播放器里的扩展 iframe：内容脚本握手成功、发来 init 之后才显示 -->
+  <div class="panel" id="panel" role="dialog" aria-labelledby="panel-title" hidden>
+    <header class="head">
+      <span class="brand" id="panel-title">RTX HDR</span>
+      <button type="button" class="link" id="btn-full" data-i18n="panel.fullSettings">完整设置</button>
+      <button type="button" class="x" id="btn-close" aria-label="关闭面板" data-i18n-attr="aria-label:panel.close;title:panel.close">
+        <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M1.5 1.5 10.5 10.5M10.5 1.5 1.5 10.5"></path></svg>
+      </button>
+    </header>
+
+    <div class="tabs" role="tablist" aria-label="面板页签" data-i18n-attr="aria-label:panel.tabs">
+      <button type="button" role="tab" id="tab-video" aria-controls="pane-video" data-tab="video" data-i18n="panel.tabVideo">本视频</button>
+      <button type="button" role="tab" id="tab-nv" aria-controls="pane-nv" data-tab="nv" data-i18n="panel.tabNv">NVIDIA</button>
+      <button type="button" role="tab" id="tab-profiles" aria-controls="pane-profiles" data-tab="profiles" data-i18n="panel.tabProfiles" hidden>配置档</button>
+    </div>
+
+    <!-- ================= 本视频 ================= -->
+    <section class="pane" id="pane-video" role="tabpanel" aria-labelledby="tab-video">
+      <div class="state">
+        <span class="big" id="v-state">HDR</span>
+        <span class="sub" id="v-reason" aria-live="polite"></span>
+      </div>
+      <p class="note warn" id="v-note" role="status" hidden></p>
+      <div class="block">
+        <span class="seg seg-dark wide" id="v-mode" role="radiogroup" aria-label="本视频" data-i18n-attr="aria-label:panel.thisVideo">
+          <label><input type="radio" name="v-mode" value="on"><span data-i18n="panel.on">开启 HDR</span></label>
+          <label><input type="radio" name="v-mode" value="off"><span data-i18n="panel.off">关闭 HDR</span></label>
+          <label><input type="radio" name="v-mode" value="follow" aria-describedby="v-follow-desc"><span data-i18n="panel.follow">跟随规则</span></label>
+        </span>
+        <span class="sr" id="v-follow-desc" data-i18n="panel.followDesc"></span>
+      </div>
+      <label class="check check-dark"><input type="checkbox" id="v-tab"><span data-i18n="panel.tab">本标签页后续视频沿用</span></label>
+      <div class="block block-row">
+        <button type="button" class="btn small inv-line" id="v-peek" data-i18n="panel.peek">按住对比</button>
+      </div>
+
+      <div class="block rule">
+        <span class="label" id="site-host" aria-hidden="true"></span>
+        <span class="seg seg-dark wide" id="site-rule" role="radiogroup">
+          <label><input type="radio" name="site-rule" value=""><span data-i18n="site.follow">跟随规则</span></label>
+          <label><input type="radio" name="site-rule" value="on"><span data-i18n="panel.siteOn">总是开启</span></label>
+          <label><input type="radio" name="site-rule" value="off"><span data-i18n="panel.siteOff">总是关闭</span></label>
+          <label><input type="radio" name="site-rule" value="fullscreen"><span data-i18n="panel.siteFs">仅全屏</span></label>
+        </span>
+      </div>
+      <div class="block">
+        <span class="label" id="auto-label" data-i18n="panel.autoShort">白底检测</span>
+        <span class="seg seg-dark wide" id="auto-mode" role="radiogroup" aria-labelledby="auto-label">
+          <label><input type="radio" name="auto-mode" value="off"><span data-i18n="autoMode.off">关闭</span></label>
+          <label><input type="radio" name="auto-mode" value="disable"><span data-i18n="autoMode.disable">只自动关闭</span></label>
+          <label><input type="radio" name="auto-mode" value="both"><span data-i18n="autoMode.both">自动开关</span></label>
+        </span>
+      </div>
+      <div class="block block-row">
+        <span class="label" id="sens-label" data-i18n="video.sensitivity">灵敏度</span>
+        <span class="seg seg-dark" id="sensitivity" role="radiogroup" aria-labelledby="sens-label">
+          <label><input type="radio" name="sensitivity" value="low"><span data-i18n="level.low">低</span></label>
+          <label><input type="radio" name="sensitivity" value="medium"><span data-i18n="level.medium">中</span></label>
+          <label><input type="radio" name="sensitivity" value="high"><span data-i18n="level.high">高</span></label>
+        </span>
+      </div>
+      <p class="note" id="v-msg" role="status"></p>
+    </section>
+
+    <!-- ================= NVIDIA ================= -->
+    <section class="pane" id="pane-nv" role="tabpanel" aria-labelledby="tab-nv" hidden>
+      <p class="note" id="nv-message" role="status" data-i18n="nv.connecting">正在连接本地组件…</p>
+      <div class="nv-missing" id="nv-missing" role="status" hidden>
+        <p id="nv-missing-text"></p>
+        <a id="nv-install" href="https://github.com/miniso7892-dotcom/rtx-hdr-switch#nvidia-settings-panel" target="_blank" rel="noopener" data-i18n="nv.install">安装方法</a>
+      </div>
+
+      <div id="nv-body" hidden>
+        <div class="block block-row">
+          <span class="label" id="nv-hdr-label" data-i18n="nv.hdr">RTX 视频 HDR</span>
+          <label class="switch">
+            <input type="checkbox" id="nv-hdr" role="switch" aria-labelledby="nv-hdr-label" aria-describedby="nv-hdr-reason">
+            <span class="track" aria-hidden="true"></span>
+          </label>
+        </div>
+        <p class="note warn" id="nv-hdr-reason" role="status" hidden></p>
+        <div class="sliders" id="nv-sliders"></div>
+
+        <div class="block">
+          <span class="label" id="nv-vsr-label" data-i18n="nv.vsrShort">超分</span>
+          <span class="seg seg-dark wide" id="nv-vsr" role="radiogroup" aria-labelledby="nv-vsr-label" aria-describedby="nv-vsr-reason">
+            <label><input type="radio" name="nv-vsr" value="5"><span data-i18n="vsr.auto">自动</span></label>
+            <label><input type="radio" name="nv-vsr" value="0"><span data-i18n="vsr.off">关</span></label>
+            <label><input type="radio" name="nv-vsr" value="1" aria-label="手动（非常低）" data-i18n-attr="aria-label:vsr.m1"><span>1</span></label>
+            <label><input type="radio" name="nv-vsr" value="2" aria-label="手动（低）" data-i18n-attr="aria-label:vsr.m2"><span>2</span></label>
+            <label><input type="radio" name="nv-vsr" value="3" aria-label="手动（中）" data-i18n-attr="aria-label:vsr.m3"><span>3</span></label>
+            <label><input type="radio" name="nv-vsr" value="4" aria-label="手动（高）" data-i18n-attr="aria-label:vsr.m4"><span>4</span></label>
+          </span>
+          <p class="note warn" id="nv-vsr-reason" role="status" hidden></p>
+        </div>
+        <div class="block block-row" id="nv-priority-row" hidden>
+          <span class="label" id="nv-priority-label" data-i18n="nv.gpuPriority">GPU 优先级</span>
+          <span class="seg seg-dark" role="radiogroup" aria-labelledby="nv-priority-label">
+            <label><input type="radio" name="nv-priority" value="0"><span data-i18n="level.low">低</span></label>
+            <label><input type="radio" name="nv-priority" value="1"><span data-i18n="level.medium">中</span></label>
+            <label><input type="radio" name="nv-priority" value="2"><span data-i18n="level.high">高</span></label>
+          </span>
+        </div>
+
+        <div class="block">
+          <span class="label" id="nv-presets-label" data-i18n="nv.preset">预设</span>
+          <div class="chips" id="nv-presets" role="group" aria-labelledby="nv-presets-label"></div>
+        </div>
+        <div class="block block-row">
+          <button type="button" class="btn small inv-line" id="nv-revert" data-i18n="panel.revert">还原到打开时</button>
+        </div>
+        <p class="note" id="nv-msg" role="status"></p>
+      </div>
+    </section>
+
+    <!-- ================= 配置档（background 支持时才显示） ================= -->
+    <section class="pane" id="pane-profiles" role="tabpanel" aria-labelledby="tab-profiles" hidden>
+      <div class="chips" id="pf-list" role="group" aria-labelledby="tab-profiles"></div>
+      <div class="block block-row">
+        <button type="button" class="btn small inv-line" id="pf-save" aria-expanded="false" data-i18n="panel.saveProfile">保存当前为配置档…</button>
+      </div>
+      <div class="block block-row" id="pf-form" hidden>
+        <input type="text" class="text" id="pf-name" maxlength="24" aria-label="配置档名称" data-i18n-attr="aria-label:panel.profileName">
+        <button type="button" class="btn small inv" id="pf-ok" data-i18n="profile.saveOk">保存</button>
+      </div>
+      <p class="note" id="pf-msg" role="status"></p>
+    </section>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="lib.js"></script>
+  <script src="ui-kit.js"></script>
+  <script src="nv-client.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

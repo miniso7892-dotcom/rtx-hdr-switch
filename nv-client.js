@@ -26,6 +26,8 @@
    *   onError(error)        接口偶尔出错、写入校验不过：只提示，不换掉整块界面
    *   beforeSet(patch)      每次 set 发出前调用，可以返回 Promise（比如先让 background 放开借用）
    *   log                   自己端口上提交的写入发 nv-log 补记进修改记录（经 background 桥的由 background 自己记）
+   *   bridgeSet(payload)    端口用不了、改走 background 时 set 怎么发（返回 Promise<回复>）；省略时发 {type:'nv', op:'set'}。
+   *                         播放器面板不能用 nv 桥写入，改走 nv-op
    *   pollMs / throttleMs / debounceMs / timeoutMs / maxPortFails
    */
   function create(opts) {
@@ -84,7 +86,8 @@
     function bridge(msg) {
       const payload = Object.assign({}, msg);
       delete payload.cmd;
-      return call(() => chrome.runtime.sendMessage({ type: 'nv', op: msg.cmd, payload: payload })).then(
+      const viaOp = msg.cmd === 'set' && typeof o.bridgeSet === 'function';
+      return call(() => (viaOp ? o.bridgeSet(payload) : chrome.runtime.sendMessage({ type: 'nv', op: msg.cmd, payload: payload }))).then(
         (r) => (r && typeof r === 'object' ? r : { ok: false, error: { code: 'host-error' } }),
         (e) => L.nvPortError((e && e.message) || 'error'));
     }

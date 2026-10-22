@@ -372,6 +372,8 @@
   function onDomMutations(records) {
     // 控制栏被网站重建、按钮跟着没了：下一帧重新放（只看一次 isConnected，不另外观察）
     if (pbtn && !btnRaf && !pbtn.el.isConnected) btnRaf = requestAnimationFrame(onBtnLost);
+    // 面板 iframe 被网站拿掉了（React 重渲染等）：直接销毁，下次悬停时重建（不把它插回去，插回去会重新加载）
+    if (pnl && !pnl.frame.isConnected) destroyPanel();
     let removed = false;
     for (let r = 0; r < records.length; r++) {
       const rec = records[r];
@@ -690,6 +692,7 @@
     updateSampler();
     report(false);
     syncButton();
+    syncPanel();
   }
 
   // ---------- 自动检测采样 ----------
@@ -872,7 +875,7 @@
     showOsd(text, OFFER_MS, video, false, 'offer');
     if (osdKind !== 'offer') return;
     osdOffer = state;
-    osdBtn.textContent = L.t(lang, state === 'on' ? 'content.tabOfferOn' : 'content.tabOfferOff');
+    osdBtn.textContent = L.t(lang, 'content.tabOffer'); // 状态就在上面那行提示里
   }
 
   const onOfferClick = guard(function (e) {
@@ -977,11 +980,8 @@
     applyState(v, peek.state, true);
     hideTip();
     renderButton();
-    const st = peek.state === 'on' ? 'HDR' : 'SDR';
-    const text = source === 'command'
-      ? L.t(lang, 'content.peekTimed', { state: st, seconds: Math.round(dur / 1000) })
-      : L.t(lang, 'content.peek', { state: st });
-    showOsd(text, dur, v, false, 'peek');
+    // 对比标记和对比同时结束，不另外写几秒后恢复
+    showOsd(L.t(lang, 'content.peek', { state: peek.state === 'on' ? 'HDR' : 'SDR' }), dur, v, false, 'peek');
     return true;
   }
 
@@ -1058,9 +1058,11 @@
     storageCall(() => runtime.sendMessage({ type: 'settings-patch', op: 'toggle-auto' }));
   }
 
-  function forgetVideo() {
+  // v：要清除的视频（面板作用于按钮所在播放器的视频），省略时是主视频
+  function forgetVideo(v) {
     evaluate(true);
-    const key = primary ? keyOf(infoOf(primary)) : pageKey;
+    const target = v && videos.has(v) ? v : primary;
+    const key = target ? keyOf(infoOf(target)) : pageKey;
     if (key) {
       savedRules.set(key, null);
       storageCall(() => chrome.storage.local.remove(L.VIDEO_PREFIX + key));
@@ -1078,7 +1080,7 @@
     tabSticky = null;
     lastManual = null;
     evaluate(true);
-    showOsd(L.t(lang, !primary ? 'content.noVideo' : hadTab ? 'content.forgotTab' : 'content.forgot'), OSD_MS, primary, false);
+    showOsd(L.t(lang, !target ? 'content.noVideo' : hadTab ? 'content.forgotTab' : 'content.forgot'), OSD_MS, target, false);
   }
 
   function saveRule(key, state) {
@@ -1109,6 +1111,7 @@
   //   都没有时 append 为真就加在最后，否则当作控制栏还没好
   //   make：照网站原生按钮的结构造按钮（大小、悬停、全屏变大、焦点框都用网站自己的 CSS）
   //   webFull：网页全屏时视频 closest 能命中的选择器（「网页全屏也算全屏」）
+  //   panelZ：设置面板 iframe 在 root 里的 z-index（盖过网站自己的控制栏和提示）
   const PLAYER_BARS = Object.freeze({
     bilibili: {
       root: '.bpx-player-container',
@@ -1117,6 +1120,7 @@
       before: ['.bpx-player-ctrl-setting', '.bpx-player-ctrl-pip', '.bpx-player-ctrl-full'],
       append: true,
       webFull: '.bpx-player-container[data-screen="web"]',
+      panelZ: 12001,
       make: makeBiliButton
     },
     youtube: {
@@ -1126,6 +1130,7 @@
       bars: ['.ytp-chrome-bottom .ytp-right-controls-left', '.ytp-chrome-bottom .ytp-right-controls'],
       before: ['.ytp-subtitles-button', '.ytp-settings-button'],
       append: true,
+      panelZ: 1004,
       make: makeYtButton
     },
     twitch: {
@@ -1134,6 +1139,7 @@
       // class 名每次构建都会变：插在包着设置按钮的那一层前面，结构和 class 运行时照设置按钮抄
       before: ['[data-a-target="player-settings-button"]'],
       append: false,
+      panelZ: 2147483000,
       make: makeTwitchButton
     },
     tencent: {
@@ -1141,6 +1147,7 @@
       bars: ['.txp_right_controls'],
       before: ['.txp_btn_pip', '.txp_btn_fake', '.txp_btn_fullscreen'],
       append: true,
+      panelZ: 2147483000,
       make: makeTxpButton
     }
   });
@@ -1189,6 +1196,31 @@
   let btnHoldSrc = '';  // 'button'（指针）| 'key'（回车）
   let btnHoldTimer = 0;
   let swallowClick = false;
+
+  // 播放器内设置面板：扩展页 panel.html 的 iframe，挂在按钮所在播放器的 root 上。它跨源，页面脚本读不到、也合成不了
+  // 它里面的可信事件。面板地址（含一次性 nonce）不写进 src 属性，网页读不到也嵌不了副本。和面板只走面板发起的
+  // tabs.connect 端口（PANEL_PORT），第一条消息核对 nonce；
+  // 不用 postMessage（网页收得到，会暴露扩展 ID）。发给面板的只有 init、state、open、close，没有写入命令
+  const PANEL_CLASS = BTN_CLASS + '-panel';
+  const PANEL_PORT = 'rtxhdr-panel';
+  const PANEL_HOVER_MS = 350;      // 悬停这么久才打开
+  const PANEL_LEAVE_MS = 400;      // 指针离开按钮和面板这么久才收起（悬停打开、还没固定的）
+  const PANEL_DESTROY_MS = 60000;  // 收起后这么久没再打开就销毁 iframe
+  const PANEL_HELLO_MS = 10000;    // 端口接上后这么久还没握手就断开
+  const PANEL_INIT_W = 320;        // 面板报告高度之前按这个尺寸预载
+  const PANEL_INIT_H = 360;
+  const PANEL_MARGIN = 8;
+  const PANEL_WAKE_MS = 500;
+  const PANEL_REBUILD_WINDOW_MS = 10000;
+  const PANEL_REBUILD_MAX = 3;
+  const PANEL_PLACE_GRACE_MS = 1500;
+  // 当前面板：{frame, root, nonce, port, verified, registered, live 登记处于启用（只在显示期间）, shown, pinned 固定（不随离开收起）,
+  //   want 等加载好再打开 {via, focus}, h 面板报告的高度, x, y, w, hh, z, overBtn, overFrame, hold, sig, css, styleAttr,
+  //   rootSig, btnOff 按钮离播放器右下角的距离, obscured,
+  //   wokeAt, placeFailAt 从什么时候起放不下, helloTimer, leaveTimer, destroyTimer, placeTimer}
+  let pnl = null;
+  let hoverTimer = 0;
+  let panelRebuilds = []; // 面板因为 iframe 被挪动而重建的时间
 
   // evaluate() 末尾调用：主视频所在播放器的控制栏里放一个按钮，状态跟着这个视频走
   function syncButtonNow() {
@@ -1242,7 +1274,7 @@
 
   function isOwnNode(n) {
     const c = n.classList;
-    return !!c && (c.contains(BTN_CLASS) || c.contains(BTN_CLASS + '-tip'));
+    return !!c && (c.contains(BTN_CLASS) || c.contains(BTN_CLASS + '-tip') || c.contains(PANEL_CLASS));
   }
 
   function placeButton(site, v, root) {
@@ -1282,6 +1314,9 @@
     b.addEventListener('keyup', onBtnKeyUp);
     b.addEventListener('focus', onBtnFocus);
     b.addEventListener('blur', onBtnBlur);
+    // 设置面板：悬停意图、离开计时（不管网站有没有 tip 都绑）
+    b.addEventListener('pointerenter', onBtnPointerEnter);
+    b.addEventListener('pointerleave', onBtnPointerLeave);
     if (made.tip) {
       made.tip.className = BTN_CLASS + '-tip';
       made.tip.setAttribute('data-rtxhdr-owner', TOKEN);
@@ -1349,6 +1384,8 @@
     const p = pbtn;
     if (!p) return;
     pbtn = null;
+    // 面板挂在这个按钮的播放器上：一起拆掉（不挪动 iframe，下次悬停在新的 root 上重建）
+    destroyPanel();
     // 按钮被移除：按住的手势作废，从按钮开始的对比结束（可能在 evaluate 里，不重新求值）
     holdReset();
     if (peek && (peek.source === 'button' || peek.source === 'key')) {
@@ -1362,14 +1399,14 @@
   // 扩展重新加载后旧实例留下的按钮、提示和样式（旧实例失效前没来得及删的）
   function removeStaleButtons() {
     let list = null;
-    try { list = document.querySelectorAll('.' + BTN_CLASS + ',.' + BTN_CLASS + '-tip,.' + BTN_CLASS + '-style'); } catch (e) { return; }
+    try { list = document.querySelectorAll('.' + BTN_CLASS + ',.' + BTN_CLASS + '-tip,.' + BTN_CLASS + '-style,.' + PANEL_CLASS); } catch (e) { return; }
     for (let i = 0; i < list.length; i++) {
       const el = list[i];
       if (el.getAttribute('data-rtxhdr-owner') !== TOKEN) { try { el.remove(); } catch (e) { /* ignore */ } }
     }
   }
 
-  // B 站小窗（data-screen="mini"）不显示按钮：用一条样式规则，切换时立即生效
+  // B 站小窗（data-screen="mini"）不显示按钮：用一条样式规则，切换时立即生效（面板的内联样式盖过它，由 panelListen 的观察器收起）
   function ensureBtnStyle() {
     if (btnSite !== 'bilibili' || (btnStyle && btnStyle.isConnected)) return;
     const el = document.createElement('style');
@@ -1390,6 +1427,7 @@
   function renderButton() {
     const p = pbtn;
     if (!p) return;
+    panelAria(p);
     const v = p.video;
     const drm = !!(v && v.mediaKeys);
     const state = v ? effState(v) : 'on';
@@ -1422,8 +1460,8 @@
       if (p.tipOn) placeTip(p);
     } else if (p.txpTip) {
       p.txpTip.textContent = text;
-    } else {
-      b.title = text;
+    } else if (!(pnl && pnl.shown)) {
+      b.title = text; // 面板打开时不显示原生提示（关闭时 p.sig 清空，重新写回）
     }
   }
 
@@ -1507,6 +1545,8 @@
   // 主指针（鼠标左键、触屏、触控笔）按下；捕获指针，移出按钮也能收到松开
   const onBtnPointerDown = guard(function (e) {
     if (!e.isTrusted || !e.isPrimary || e.button !== 0) return;
+    // 按下就是点击或按住对比：还没打开的悬停面板不再打开（单击只切换）
+    cancelHoverOpen();
     holdBegin('button');
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
   });
@@ -1520,9 +1560,18 @@
     if (btnHoldSrc === 'button') holdReset();
   });
 
-  // 触屏长按：按满之后别弹出系统菜单
+  // 触屏长按：按满之后别弹出系统菜单。「右键打开」时右键开关设置面板，不出现网站的右键菜单
   const onBtnContextMenu = guard(function (e) {
-    if (btnHold.held || swallowClick) e.preventDefault();
+    if (btnHold.held || swallowClick) {
+      e.preventDefault();
+      return;
+    }
+    if (panelMode() !== 'right') return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.isTrusted) return;
+    if (pnl && pnl.shown) hidePanel('toggle');
+    else showPanel('right', false);
   });
 
   // 回车：短按（松开时）= 点击，按住 = 对比（<button> 自己的回车点击被取消，避免切两次）；空格留给播放器
@@ -1531,7 +1580,16 @@
       btnSpace = true;
       return;
     }
-    if (e.key !== 'Enter' || e.isComposing) return;
+    if (e.isComposing) return;
+    // ↑ 或 Shift+Enter：打开设置面板并把焦点移进去（面板关闭时 Shift+Enter 和回车一样）
+    if ((e.key === 'ArrowUp' || (e.key === 'Enter' && e.shiftKey)) && panelMode() !== 'off') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat || !e.isTrusted) return;
+      showPanel('key', true);
+      return;
+    }
+    if (e.key !== 'Enter') return;
     e.preventDefault();
     e.stopPropagation();
     if (e.repeat || !e.isTrusted) return;
@@ -1571,7 +1629,7 @@
 
   function showTip() {
     const p = pbtn;
-    if (!p || !p.tip) return;
+    if (!p || !p.tip || (pnl && pnl.shown)) return;
     if (p.tip.parentNode !== p.tipHost) p.tipHost.appendChild(p.tip);
     p.tip.style.display = 'block';
     p.tipOn = true;
@@ -1600,6 +1658,686 @@
     tip.style.left = Math.round(x - o.left) + 'px';
     tip.style.top = Math.round(b.top - gap - h - o.top) + 'px';
   }
+
+  // ---------- 播放器内设置面板 ----------
+
+  function panelMode() {
+    const m = settings.playerPanel;
+    return m === 'right' || m === 'off' ? m : 'hover';
+  }
+
+  // 按钮上的 aria-haspopup / aria-expanded；面板打开时收起网站的提示（腾讯的 txp_tooltip、Twitch 的 title）
+  function panelAria(p) {
+    const b = p.btn;
+    const open = !!(pnl && pnl.shown);
+    if (panelMode() === 'off') {
+      if (b.hasAttribute('aria-haspopup')) b.removeAttribute('aria-haspopup');
+      if (b.hasAttribute('aria-expanded')) b.removeAttribute('aria-expanded');
+    } else {
+      if (b.getAttribute('aria-haspopup') !== 'dialog') b.setAttribute('aria-haspopup', 'dialog');
+      const ex = open ? 'true' : 'false';
+      if (b.getAttribute('aria-expanded') !== ex) b.setAttribute('aria-expanded', ex);
+    }
+    if (p.txpTip) {
+      if (open) p.txpTip.style.setProperty('display', 'none', 'important');
+      else if (p.txpTip.style.display) p.txpTip.style.removeProperty('display');
+    }
+    if (open && !p.tip && !p.txpTip && b.hasAttribute('title')) b.removeAttribute('title');
+  }
+
+  // 面板作用于按钮所在播放器的视频
+  function panelVideo() {
+    const v = pbtn && pbtn.video;
+    return v && v.isConnected && videos.has(v) ? v : null;
+  }
+
+  // 推给面板的状态（字段含义同 snapshot()）
+  function panelSnapshot() {
+    const v = panelVideo();
+    const info = v ? infoOf(v) : null;
+    const key = info ? keyOf(info) : pageKey;
+    const d = info && info.decisionKey === key ? info.decision : null;
+    const drm = !!(v && v.mediaKeys);
+    const contested = !!(d && !drm && info.contested && d.state === 'off');
+    const saved = savedRules.get(key);
+    return {
+      hasVideo: !!v,
+      drm: drm,
+      state: d ? info.eff : null,
+      reason: !d ? null : drm ? 'drm' : contested ? 'contested' : d.reason,
+      manual: !!(info && info.manualKey === key && info.manual),
+      saved: saved ? saved.s : null,
+      tab: tabSticky ? tabSticky.state : null,
+      peek: !!(peek && v && peek.video === v),
+      hdrOnly: hdrOnly && !!v && v === primary,
+      eyeRest: !!eyeRestAt,
+      pip: !!(v && v === pipVideo),
+      topHostname: topHostname
+    };
+  }
+
+  function postPanel(q, msg) {
+    if (!q.port) return;
+    try { q.port.postMessage(msg); } catch (e) { /* 端口已断开 */ }
+  }
+
+  function randomNonce() {
+    const a = new Uint8Array(16);
+    crypto.getRandomValues(a);
+    return Array.from(a, (x) => (x < 16 ? '0' : '') + x.toString(16)).join('');
+  }
+
+  // 内联样式全部带 !important（网站的样式盖不过它）；显示和隐藏只切换 visibility。
+  // 盖在视频上：不透明，不用 filter、transform、过渡
+  function panelCss(q) {
+    const css = 'all:initial !important;position:absolute !important;display:block !important;box-sizing:border-box !important;' +
+      'margin:0 !important;padding:0 !important;border:0 !important;border-radius:0 !important;' +
+      'background:#0A0A0A !important;color-scheme:dark !important;opacity:1 !important;' +
+      'transform:none !important;filter:none !important;clip-path:none !important;transition:none !important;' +
+      'min-width:0 !important;min-height:0 !important;max-width:none !important;max-height:none !important;' +
+      'z-index:' + q.z + ' !important;left:' + q.x + 'px !important;top:' + q.y + 'px !important;' +
+      'width:' + q.w + 'px !important;height:' + q.hh + 'px !important;' +
+      'visibility:' + (q.shown ? 'visible' : 'hidden') + ' !important;pointer-events:' + (q.shown ? 'auto' : 'none') + ' !important;';
+    if (q.css === css && q.frame.getAttribute('style') === q.styleAttr) return;
+    q.css = css;
+    q.frame.style.cssText = css;
+    q.styleAttr = q.frame.getAttribute('style');
+  }
+
+  // 面板 iframe：第一次悬停（或右键、键盘打开）时插入，先隐藏着加载；之后只切换 visibility
+  function ensurePanelFrame() {
+    const p = pbtn;
+    const site = p ? PLAYER_BARS[p.site] : null;
+    if (!site || panelMode() === 'off') return null;
+    if (pnl && pnl.root === p.root && pnl.frame.isConnected) {
+      schedulePanelExpire(pnl);
+      return pnl;
+    }
+    // 面板要知道本 frame 的 id 才能连回来：子 frame 等 background 回复过报告（selfFrame）再建
+    const parentFrame = isTop ? 0 : selfFrame;
+    if (!(parentFrame >= 0)) return null;
+    destroyPanel();
+    const f = document.createElement('iframe');
+    const nonce = randomNonce();
+    f.className = PANEL_CLASS;
+    f.setAttribute('data-rtxhdr-owner', TOKEN);
+    f.setAttribute('title', L.t(lang, 'panel.frameTitle'));
+    const q = {
+      frame: f, root: p.root, nonce: nonce, port: null, verified: false, registered: false, live: false,
+      shown: false, pinned: false, want: null, h: 0, x: 0, y: 0, w: PANEL_INIT_W, hh: PANEL_INIT_H, z: site.panelZ || 2147483000,
+      overBtn: false, overFrame: false, hold: false, sig: '', css: '', styleAttr: '', rootSig: '', obscured: 0,
+      wokeAt: 0, btnOff: null, placeFailAt: 0, helloTimer: 0, leaveTimer: 0, destroyTimer: 0, placeTimer: 0
+    };
+    pnl = q;
+    panelCss(q);
+    f.addEventListener('pointerenter', onPanelFrameEnter);
+    f.addEventListener('pointerleave', onPanelFrameLeave);
+    p.root.appendChild(f);
+    // 预载了却一直没打开（指针只是扫过按钮）的 iframe 也按时销毁
+    schedulePanelExpire(q);
+    // 地址不写进 src 属性（网页读得到属性，读得到就能自己嵌一份），而是把空白 iframe 导航过去：跨源以后网页读不到它的地址。
+    // hash 里是本 frame 的 id（扩展页面拿不到 frameId）和 nonce（面板用它向 background 认领自己，握手时交回来）
+    try {
+      f.contentWindow.location.replace(runtime.getURL('panel.html') + '#f=' + parentFrame + '&n=' + nonce);
+    } catch (e) {
+      destroyPanel();
+      return null;
+    }
+    return q;
+  }
+
+  // 拆掉面板：端口、登记、iframe 一起（按钮移除、root 换了、扩展失效、页面离开、收起 60 秒后）
+  function destroyPanel() {
+    const q = pnl;
+    if (!q) return;
+    if (q.shown) panelClosed(q);
+    pnl = null;
+    clearTimeout(q.helloTimer);
+    clearTimeout(q.leaveTimer);
+    clearTimeout(q.destroyTimer);
+    clearTimeout(q.placeTimer);
+    clearTimeout(hoverTimer);
+    hoverTimer = 0;
+    if (q.port) {
+      try { q.port.disconnect(); } catch (e) { /* ignore */ }
+      q.port = null;
+    }
+    q.live = false;
+    if (q.registered) {
+      q.registered = false;
+      panelRegister(q, 'remove');
+    }
+    try { q.frame.remove(); } catch (e) { /* ignore */ }
+    if (pbtn) {
+      pbtn.sig = '';
+      renderButton();
+    }
+  }
+
+  // 收起（或预载）60 秒后销毁 iframe。到点时还显示着、等着打开或者指针正在按钮上：再等一轮
+  function schedulePanelExpire(q) {
+    clearTimeout(q.destroyTimer);
+    q.destroyTimer = setTimeout(onPanelExpire, PANEL_DESTROY_MS);
+  }
+
+  const onPanelExpire = guard(function () {
+    const q = pnl;
+    if (!q) return;
+    q.destroyTimer = 0;
+    if (q.shown || q.want || q.overBtn || hoverTimer) schedulePanelExpire(q);
+    else destroyPanel();
+  });
+
+  // 告诉 background 这个 frame 是握手过的面板：'add' 登记（先停用），'open' / 'close' 显示期间启用、收起时停用
+  // （停用时面板什么都改不了），'remove' 注销；返回 Promise<是否成功>
+  function panelRegister(q, op) {
+    try {
+      return Promise.resolve(runtime.sendMessage({ type: 'panel-frame', op: op, nonce: q.nonce }))
+        .then((r) => !!r && r.ok === true, () => false);
+    } catch (e) {
+      return Promise.resolve(false);
+    }
+  }
+
+  function isPanelUrl(url) {
+    try {
+      const u = new URL(url);
+      return u.protocol === 'chrome-extension:' && u.pathname === '/panel.html';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // 面板发起的端口：只认本扩展 /panel.html，每个面板只认第一个端口；第一条消息必须带着 nonce。
+  // 网页拿不到面板的地址（见 ensurePanelFrame），自己嵌的副本连不上，什么都不显示
+  const onPanelConnect = guard(function (port) {
+    if (!port || port.name !== PANEL_PORT) return;
+    const q = pnl;
+    const s = port.sender || {};
+    if (!q || q.port || !q.frame.isConnected || s.id !== runtime.id || !isPanelUrl(s.url)) {
+      try { port.disconnect(); } catch (e) { /* ignore */ }
+      return;
+    }
+    q.port = port;
+    port.onMessage.addListener(guard(function (msg) { onPanelPortMsg(q, port, msg); }));
+    port.onDisconnect.addListener(guard(function () {
+      if (pnl === q && q.port === port) panelGone(q);
+    }));
+    q.helloTimer = setTimeout(guard(function () {
+      if (pnl === q && q.port === port && !q.verified) destroyPanel();
+    }), PANEL_HELLO_MS);
+  });
+
+  // 面板文档没了（端口断开）。网站把整个播放器挪到别的容器时（YouTube 全屏、影院模式）iframe 会重新加载成空白：
+  // 打开着的面板就地重建、重新打开（10 秒内最多 3 次，免得和网站来回折腾）
+  function panelGone(q) {
+    const via = q.shown ? (q.pinned ? 'key' : 'hover') : q.want ? q.want.via : '';
+    destroyPanel();
+    if (!via || !pbtn || q.root !== pbtn.root || !q.root.isConnected) return;
+    const now = Date.now();
+    panelRebuilds = panelRebuilds.filter((t) => now - t < PANEL_REBUILD_WINDOW_MS);
+    if (panelRebuilds.length >= PANEL_REBUILD_MAX) return;
+    panelRebuilds.push(now);
+    showPanel(via, false);
+  }
+
+  function onPanelPortMsg(q, port, msg) {
+    if (pnl !== q || q.port !== port || !msg || typeof msg !== 'object') return;
+    if (!q.verified) {
+      // 第一条必须是带 nonce 的 hello
+      if (msg.type !== 'hello' || typeof msg.nonce !== 'string' || msg.nonce !== q.nonce) {
+        destroyPanel();
+        return;
+      }
+      q.verified = true;
+      clearTimeout(q.helloTimer);
+      // 先让 background 登记（按 nonce 对上面板认领的 frameId；面板这才能改设置、走 nv-op），再把初始状态发给面板
+      q.registered = true;
+      panelRegister(q, 'add').then(guard(function (ok) {
+        if (pnl !== q || q.port !== port) return;
+        if (!ok) {
+          destroyPanel();
+          return;
+        }
+        const st = panelSnapshot();
+        q.sig = JSON.stringify(st);
+        postPanel(q, { type: 'init', state: st, topHost: topHostname, site: btnSite, trigger: panelMode() });
+      }));
+      return;
+    }
+    const t = msg.type;
+    if (t === 'size') {
+      const h = Math.round(+msg.h);
+      if (!(h > 0)) return;
+      q.h = Math.min(h, 4000);
+      q.rootSig = '';
+      if (q.want) revealPanel(q);
+      else if (q.shown) replacePanel(q);
+      return;
+    }
+    // 其余都是用户在看得见的面板里的操作
+    if (!q.shown) return;
+    if (t === 'video') panelSetVideo(msg.op);
+    else if (t === 'tab') panelSetTab(msg.on === true);
+    else if (t === 'peek') panelPeek(msg.on === true);
+    else if (t === 'pin') q.pinned = true;
+    else if (t === 'hold' || t === 'hover' || t === 'activity') {
+      if (t === 'hold') q.hold = msg.on === true;
+      else q.overFrame = t === 'activity' || msg.on === true;
+      panelLeaveCheck(q);
+      if (t === 'activity') wakeControls(q, +msg.x, +msg.y);
+    } else if (t === 'close') {
+      hidePanel(msg.reason === 'esc' || msg.reason === 'tab' ? msg.reason : 'done');
+    }
+  }
+
+  function panelSetVideo(op) {
+    const v = panelVideo();
+    if (!v || v.mediaKeys) return;
+    if (op === 'clear') {
+      forgetVideo(v);
+    } else if (op === 'on' || op === 'off') {
+      evaluate(true);
+      setManual(v, op);
+    }
+  }
+
+  function panelSetTab(on) {
+    if (!on) {
+      if (tabSticky) setTabSticky(null);
+      return;
+    }
+    const v = panelVideo();
+    if (v && !v.mediaKeys) setTabSticky(effState(v));
+  }
+
+  // 面板上的「按住对比」：按下开始、松开结束（面板收起、端口断开时也结束）
+  function panelPeek(on) {
+    if (!on) {
+      peekEnd('panel');
+      return;
+    }
+    if (peek) return;
+    const v = panelVideo();
+    if (v && !v.mediaKeys) peekStart(v, 'panel', L.PEEK_MAX_MS);
+  }
+
+  // via：'hover' 悬停打开（临时，离开就收）| 'right' 右键 | 'key' 键盘（固定）。iframe 还没加载好时等它报告高度再打开
+  function showPanel(via, focus) {
+    clearTimeout(hoverTimer);
+    hoverTimer = 0;
+    if (!pbtn || panelMode() === 'off') return;
+    const q = ensurePanelFrame();
+    if (!q) return;
+    if (via !== 'hover') q.pinned = true;
+    if (q.shown) {
+      if (focus) {
+        try { q.frame.focus(); } catch (e) { /* ignore */ }
+        postPanel(q, { type: 'open', via: via, focus: true });
+      }
+      return;
+    }
+    q.want = { via: via, focus: !!focus };
+    if (q.verified && q.h) revealPanel(q);
+  }
+
+  function revealPanel(q) {
+    const want = q.want;
+    q.want = null;
+    if (!want || pnl !== q || !panelVisibleNow(q)) return;
+    q.shown = true;
+    q.rootSig = '';
+    if (!placePanel(q)) {
+      q.shown = false;
+      panelCss(q);
+      return;
+    }
+    q.obscured = 0;
+    hideTip();
+    panelListen(true);
+    if (pbtn) panelAria(pbtn);
+    panelLeaveCheck(q); // 悬停打开时指针已经不在按钮上（重建后重新打开）：照样按离开计时
+    // 先在 background 启用登记，再告诉面板打开（面板收到 open 之前不发任何写入）
+    const go = () => {
+      postPanel(q, { type: 'open', via: want.via, focus: want.focus });
+      if (want.focus) {
+        try { q.frame.focus(); } catch (e) { /* ignore */ }
+      }
+    };
+    if (q.live) {
+      go();
+      return;
+    }
+    q.live = true;
+    panelRegister(q, 'open').then(guard(function (ok) {
+      if (pnl !== q || !q.shown) return;
+      if (ok) go();
+      else panelGone(q); // 登记没了（service worker 丢了它等）：重建
+    }));
+  }
+
+  // reason：'esc' | 'tab'（焦点还给按钮）| 'leave' | 'outside' | 'toggle' | 'done' | 'lost' | 'obscured' | 'hidden'
+  function hidePanel(reason) {
+    cancelHoverOpen();
+    const q = pnl;
+    if (!q) return;
+    q.want = null;
+    if (!q.shown) return;
+    // 焦点不能留在隐藏的面板里：网站的快捷键会被它吞掉，方向键还会改到看不见的控件
+    const focused = deepElement('activeElement') === q.frame;
+    panelClosed(q);
+    panelCss(q);
+    postPanel(q, { type: 'close' });
+    if (q.live) {
+      q.live = false;
+      panelRegister(q, 'close');
+    }
+    if (pbtn) {
+      pbtn.sig = ''; // 写回 Twitch 的 title
+      renderButton();
+    }
+    if (pbtn && (reason === 'esc' || reason === 'tab')) {
+      focusButton();
+    } else if (focused) {
+      try { q.frame.blur(); } catch (e) { /* ignore */ }
+    }
+    schedulePanelExpire(q);
+  }
+
+  // 焦点还给按钮。控制栏自动隐藏时按钮拿不到焦点：先在按钮上补一个 mousemove 让控制栏出来，过一会儿再试一次
+  function focusButton() {
+    const p = pbtn;
+    const tryFocus = () => {
+      try { p.btn.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+      return document.activeElement === p.btn;
+    };
+    if (!p || tryFocus()) return;
+    const r = p.btn.getBoundingClientRect();
+    try { p.btn.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); } catch (e) { /* ignore */ }
+    setTimeout(guard(function () { if (pbtn === p) tryFocus(); }), 150);
+  }
+
+  // 收起的公共部分（不写样式、不发消息）：从面板开始的对比一起结束
+  function panelClosed(q) {
+    q.shown = false;
+    q.pinned = false;
+    q.hold = false;
+    q.overFrame = false;
+    q.obscured = 0;
+    q.placeFailAt = 0;
+    clearTimeout(q.leaveTimer);
+    clearTimeout(q.placeTimer);
+    q.leaveTimer = 0;
+    panelListen(false);
+    if (peek && peek.source === 'panel') {
+      peekClear();
+      scheduleEvaluate();
+    }
+  }
+
+  function cancelHoverOpen() {
+    clearTimeout(hoverTimer);
+    hoverTimer = 0;
+    if (pnl && pnl.want && pnl.want.via === 'hover') pnl.want = null;
+  }
+
+  // 面板放在按钮正上方，夹在播放器里（位置同 tip）；高度取面板报告的，放不下时面板内部滚动。
+  // 播放器太小（窄于 260 或按钮上方放不下 160 高）时不打开
+  function placePanel(q) {
+    const p = pbtn;
+    if (!p || !q.frame.isConnected) return false;
+    let b = p.btn.getBoundingClientRect();
+    const c = q.root.getBoundingClientRect();
+    if (b.width > 0 && b.height > 0) {
+      q.btnOff = { r: c.right - b.left, bt: c.bottom - b.top, w: b.width, h: b.height };
+    } else if (q.btnOff) {
+      // 控制栏自动隐藏时按钮没有尺寸（进出全屏时常见）：按上次按钮离播放器右下角的距离推算
+      b = { left: c.right - q.btnOff.r, top: c.bottom - q.btnOff.bt, width: q.btnOff.w, height: q.btnOff.h };
+    } else {
+      return false;
+    }
+    const w = L.panelWidth(c.width);
+    if (!w) return false;
+    const gap = p.site === 'bilibili' ? Math.round(b.width * 0.53) : Math.round(22 * b.height / 40);
+    const want = q.h || PANEL_INIT_H;
+    const pos = L.placeAbove(b, c, w, want, gap, PANEL_MARGIN);
+    if (!pos || pos.h < Math.min(L.PANEL_MIN_H, want)) return false;
+    const op = q.frame.offsetParent;
+    const o = op ? op.getBoundingClientRect() : c;
+    q.x = Math.round(pos.x - o.left - (op ? op.clientLeft : 0));
+    q.y = Math.round(pos.y - o.top - (op ? op.clientTop : 0));
+    q.w = w;
+    q.hh = pos.h;
+    q.rootSig = rootSigOf(c);
+    panelCss(q);
+    return true;
+  }
+
+  function rootSigOf(c) {
+    return Math.round(c.left) + ',' + Math.round(c.top) + ',' + Math.round(c.width) + ',' + Math.round(c.height);
+  }
+
+  // 看得见的情况下才显示：页面可见、B 站不是小窗、全屏时全屏元素包含面板
+  function panelVisibleNow(q) {
+    if (document.hidden || !q.frame.isConnected) return false;
+    if (pbtn && pbtn.site === 'bilibili' && q.root.getAttribute('data-screen') === 'mini') return false;
+    const fs = deepElement('fullscreenElement');
+    return !fs || containsDeep(fs, q.frame);
+  }
+
+  // evaluate() 末尾调用：状态变了推给面板；打开着时检查看不看得见、播放器尺寸、内联样式、有没有被盖住
+  function syncPanelNow() {
+    const q = pnl;
+    if (!q) return;
+    if (!pbtn || pbtn.root !== q.root || !q.frame.isConnected || panelMode() === 'off') {
+      destroyPanel();
+      return;
+    }
+    if (q.verified && q.port) {
+      const st = panelSnapshot();
+      const sig = JSON.stringify(st);
+      if (sig !== q.sig) {
+        q.sig = sig;
+        postPanel(q, { type: 'state', state: st });
+      }
+    }
+    if (!q.shown) return;
+    if (!panelVisibleNow(q)) {
+      hidePanel('lost');
+      return;
+    }
+    panelCss(q); // 页面改了 iframe 的内联样式：写回
+    if (rootSigOf(q.root.getBoundingClientRect()) !== q.rootSig && !replacePanel(q)) return;
+    checkObscured(q);
+  }
+
+  // 播放器尺寸变了，重新定位。进出全屏时网站的布局要过一会儿才稳定：放不下时先留在原处，1.5 秒后还放不下才收起
+  function replacePanel(q) {
+    if (placePanel(q)) {
+      q.placeFailAt = 0;
+      return true;
+    }
+    const now = Date.now();
+    if (!q.placeFailAt) q.placeFailAt = now;
+    if (now - q.placeFailAt < PANEL_PLACE_GRACE_MS) {
+      clearTimeout(q.placeTimer);
+      q.placeTimer = setTimeout(onPanelResize, 300);
+      return true;
+    }
+    hidePanel('lost');
+    return false;
+  }
+  const syncPanel = guard(syncPanelNow);
+
+  // 防点击劫持：面板被网页元素盖住，或者被改得看不见（visibility、祖先的透明度、filter、mask）就收起。连续两次才算，避开网站的过渡动画。
+  // pointer-events:none 的遮罩打点查不到。IntersectionObserver v2 查得到，但 Twitch 自己就有盖住整个播放器的透明遮罩
+  // （celebration__overlay），腾讯视频也常被它误判，所以不用
+  function checkObscured(q) {
+    const f = q.frame;
+    let ok = true;
+    try {
+      if (typeof f.checkVisibility === 'function' && !f.checkVisibility({
+        visibilityProperty: true, opacityProperty: true, checkVisibilityCSS: true, checkOpacity: true
+      })) ok = false;
+    } catch (e) { /* ignore */ }
+    let opacity = 1;
+    for (let n = f, i = 0; ok && n && n.nodeType === 1 && i < 64; i++) {
+      const cs = getComputedStyle(n);
+      opacity *= parseFloat(cs.opacity);
+      if (n !== f && ((cs.filter && cs.filter !== 'none') || (cs.maskImage && cs.maskImage !== 'none') ||
+        (cs.webkitMaskImage && cs.webkitMaskImage !== 'none'))) ok = false;
+      const p = n.parentNode;
+      n = p && p.nodeType === 11 && p.host ? p.host : p;
+    }
+    if (!(opacity >= 0.9)) ok = false;
+    if (ok) {
+      const r = f.getBoundingClientRect();
+      const rn = f.getRootNode();
+      const d = rn && typeof rn.elementFromPoint === 'function' ? rn : document;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      for (const pt of [[0.5, 0.5], [0.15, 0.15], [0.85, 0.15], [0.15, 0.85], [0.85, 0.85]]) {
+        const x = r.left + r.width * pt[0];
+        const y = r.top + r.height * pt[1];
+        if (x < 0 || y < 0 || x >= vw || y >= vh) continue;
+        const hit = d.elementFromPoint(x, y);
+        if (hit !== f && !(osdEl && hit === osdEl)) {
+          ok = false;
+          break;
+        }
+      }
+    }
+    q.obscured = ok ? 0 : q.obscured + 1;
+    if (q.obscured >= 2) hidePanel('obscured');
+  }
+
+  // 指针在面板上：给 root 补一个 mousemove，网站的控制栏不会自动隐藏（只用来显示控制栏）
+  function wakeControls(q, x, y) {
+    const now = Date.now();
+    if (now - q.wokeAt < PANEL_WAKE_MS) return;
+    q.wokeAt = now;
+    const r = q.frame.getBoundingClientRect();
+    const cx = r.left + Math.min(Math.max(isFinite(x) ? x : 0, 0), r.width);
+    const cy = r.top + Math.min(Math.max(isFinite(y) ? y : 0, 0), r.height);
+    try { q.root.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: cx, clientY: cy })); } catch (e) { /* ignore */ }
+  }
+
+  // 悬停打开、还没固定的面板：指针离开按钮和面板 400 ms 后收起；拖动滑块、按住对比期间不收
+  function panelLeaveCheck(q) {
+    if (!q.shown || q.pinned || q.overBtn || q.overFrame || q.hold) {
+      clearTimeout(q.leaveTimer);
+      q.leaveTimer = 0;
+      return;
+    }
+    if (!q.leaveTimer) q.leaveTimer = setTimeout(onPanelLeaveDue, PANEL_LEAVE_MS);
+  }
+
+  const onPanelLeaveDue = guard(function () {
+    const q = pnl;
+    if (!q) return;
+    q.leaveTimer = 0;
+    if (q.shown && !q.pinned && !q.overBtn && !q.overFrame && !q.hold) hidePanel('leave');
+  });
+
+  // 悬停意图：鼠标、触控笔进入按钮就预载面板，停 350 ms 再打开（触屏的点按也会先来 pointerenter，不算）
+  const onBtnPointerEnter = guard(function (e) {
+    if (!e.isTrusted) return;
+    if (pnl) {
+      pnl.overBtn = true;
+      panelLeaveCheck(pnl);
+    }
+    if (panelMode() !== 'hover' || e.pointerType === 'touch' || btnHold.pressed) return;
+    if (pnl && (pnl.shown || pnl.want)) return;
+    const q = ensurePanelFrame();
+    if (!q) return;
+    q.overBtn = true;
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(onHoverDue, PANEL_HOVER_MS);
+  });
+
+  const onHoverDue = guard(function () {
+    hoverTimer = 0;
+    if (pnl && pnl.overBtn && !btnHold.pressed && !peek) showPanel('hover', false);
+  });
+
+  const onBtnPointerLeave = guard(function (e) {
+    if (!e.isTrusted) return;
+    cancelHoverOpen();
+    if (!pnl) return;
+    pnl.overBtn = false;
+    panelLeaveCheck(pnl);
+  });
+
+  const onPanelFrameEnter = guard(function (e) {
+    if (!e.isTrusted || !pnl || e.currentTarget !== pnl.frame) return;
+    pnl.overFrame = true;
+    panelLeaveCheck(pnl);
+  });
+
+  const onPanelFrameLeave = guard(function (e) {
+    if (!e.isTrusted || !pnl || e.currentTarget !== pnl.frame) return;
+    pnl.overFrame = false;
+    panelLeaveCheck(pnl);
+  });
+
+  // 打开期间挂在 document 上：点外面收起（只收起，不拦事件）、Esc 收起、窗口尺寸变了重新定位；
+  // B 站还看着播放器 root 的 data-screen（切到小窗时立即收起，不等下一次求值）
+  const panelAttrObserver = new MutationObserver(guard(function () {
+    if (pnl && pnl.shown && !panelVisibleNow(pnl)) hidePanel('lost');
+  }));
+
+  function panelListen(on) {
+    try {
+      if (on) {
+        if (pnl && pbtn && pbtn.site === 'bilibili') panelAttrObserver.observe(pnl.root, { attributes: true, attributeFilter: ['data-screen'] });
+        document.addEventListener('pointerdown', onPanelOutside, true);
+        document.addEventListener('pointermove', onPanelDocMove, true);
+        document.addEventListener('keydown', onPanelDocKey, true);
+        window.addEventListener('resize', onPanelResize);
+      } else {
+        panelAttrObserver.disconnect();
+        document.removeEventListener('pointerdown', onPanelOutside, true);
+        document.removeEventListener('pointermove', onPanelDocMove, true);
+        document.removeEventListener('keydown', onPanelDocKey, true);
+        window.removeEventListener('resize', onPanelResize);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  const onPanelOutside = guard(function (e) {
+    const q = pnl;
+    if (!e.isTrusted || !q || !q.shown) return;
+    const t = typeof e.composedPath === 'function' ? e.composedPath()[0] : e.target;
+    if (t === q.frame || (pbtn && t && pbtn.el.contains(t))) return;
+    hidePanel('outside');
+  });
+
+  // 指针在本页面里移动（在面板上时事件发给面板，不会到这里）：不在面板上了，在不在按钮上看目标。
+  // 跨进程的 iframe 离开时父页面和面板都不一定收得到 leave 事件，靠这个兜底
+  const onPanelDocMove = guard(function (e) {
+    const q = pnl;
+    if (!e.isTrusted || !q || !q.shown || q.pinned) return;
+    const t = typeof e.composedPath === 'function' ? e.composedPath()[0] : e.target;
+    if (t === q.frame) return;
+    const onBtn = !!(pbtn && t && pbtn.el.contains(t));
+    if (q.overFrame || q.overBtn !== onBtn) {
+      q.overFrame = false;
+      q.overBtn = onBtn;
+      panelLeaveCheck(q);
+    }
+  });
+
+  // 焦点在按钮上时按 Esc：收起并把焦点留在按钮上（焦点在面板里时由面板发 close）
+  const onPanelDocKey = guard(function (e) {
+    if (!e.isTrusted || e.key !== 'Escape' || !pnl || !pnl.shown) return;
+    hidePanel(pbtn && document.activeElement === pbtn.btn ? 'esc' : 'outside');
+  });
+
+  const onPanelResize = guard(function () {
+    if (!pnl || !pnl.shown) return;
+    pnl.rootSig = '';
+    replacePanel(pnl);
+  });
 
   function svgEl(name, css, attrs) {
     const el = document.createElementNS(SVG_NS, name);
@@ -1973,8 +2711,9 @@
   });
   const onVisibility = guard(function () {
     if (document.hidden) {
-      // 页面隐藏：按住的手势作废，对比结束
+      // 页面隐藏：按住的手势作废，对比结束，面板收起
       holdReset();
+      hidePanel('hidden');
       if (peek) peekEnd();
       updateSampler();
       return;
@@ -2000,6 +2739,7 @@
   });
   // 文档要离开（iframe 被移除、整页导航、进入往返缓存）：告诉 background 这个 frame 没有视频了
   const onPageHide = guard(function () {
+    destroyPanel();
     if (!everReported) return;
     lastSig = '';
     const r = buildReport();
@@ -2050,6 +2790,7 @@
     clearTimeout(evalTimer);
     clearTimeout(osdHideTimer);
     clearTimeout(btnHoldTimer);
+    clearTimeout(hoverTimer);
     if (peek) {
       clearTimeout(peek.timer);
       peek = null;
@@ -2080,6 +2821,7 @@
     videos.clear();
     removeOsd();
     try { runtime.onMessage.removeListener(onMessage); } catch (e) { /* ignore */ }
+    try { runtime.onConnect.removeListener(onPanelConnect); } catch (e) { /* ignore */ }
     try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch (e) { /* ignore */ }
     if (window.__rtxHdrSwitchLoaded === handle) window.__rtxHdrSwitchLoaded = undefined;
     if (mode === 'keep') {
@@ -2104,6 +2846,7 @@
   try {
     document.addEventListener(TAKEOVER_EVENT, onTakeover);
     runtime.onMessage.addListener(onMessage);
+    runtime.onConnect.addListener(onPanelConnect);
     chrome.storage.onChanged.addListener(onStorageChanged);
   } catch (e) {
     destroy('now');

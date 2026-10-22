@@ -36,7 +36,7 @@
     "description": "Command"
   },
   "cmdPeek": {
-    "message": "Compare HDR and SDR (back after 5 s)",
+    "message": "Compare HDR and SDR for a moment",
     "description": "Command"
   },
   "cmdNextProfile": {

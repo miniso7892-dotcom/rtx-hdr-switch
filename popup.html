@@ -73,7 +73,7 @@
               <option value="" data-i18n="site.follow">跟随规则</option>
               <option value="on" data-i18n="site.on">总是开启 HDR</option>
               <option value="off" data-i18n="site.off">总是关闭 HDR</option>
-              <option value="fullscreen" data-i18n="site.fullscreen">仅全屏时开启 HDR</option>
+              <option value="fullscreen" data-i18n="site.fullscreen">仅全屏</option>
             </select>
           </span>
         </div>
@@ -297,6 +297,14 @@
       <label class="check row-check"><input type="checkbox" id="remember-manual"><span data-i18n="rules.remember">手动切换后记住此视频</span></label>
       <label class="check row-check"><input type="checkbox" id="show-osd"><span data-i18n="rules.osd">切换时显示屏幕提示</span></label>
       <label class="check row-check"><input type="checkbox" id="player-button"><span data-i18n="rules.playerButton">在播放器控制栏显示 HDR 按钮</span></label>
+      <div class="row">
+        <span id="player-panel-label" data-i18n="rules.playerPanel">面板打开方式</span>
+        <span class="seg" role="radiogroup" aria-labelledby="player-panel-label">
+          <label><input type="radio" name="player-panel" value="hover"><span data-i18n="rules.panelHover">悬停</span></label>
+          <label><input type="radio" name="player-panel" value="right"><span data-i18n="rules.panelRight">右键</span></label>
+          <label><input type="radio" name="player-panel" value="off"><span data-i18n="rules.panelOff">关闭</span></label>
+        </span>
+      </div>
 
       <section class="block keys" aria-labelledby="keys-title">
         <div class="block-head">

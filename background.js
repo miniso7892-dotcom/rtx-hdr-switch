@@ -61,6 +61,11 @@ const CONTENT_PATCH_PER_SEC = 10;
 // 面板能用的 nv-op 和 nv（不开放 display、follow-check）
 const PANEL_NV_OPS = new Set(['set', 'apply-preset', 'undo']);
 const PANEL_NV_CMDS = new Set(['hello', 'get']);
+// 面板 iframe 的登记也存进 storage.session：service worker 被回收、重启后，已经打开的面板照样能用
+const PANEL_FRAMES_KEY = 'panelFrames';
+const PANEL_FRAMES_MAX = 8; // 每个标签页最多登记几个面板 iframe（多了先丢最早的）
+const PANEL_CLAIM_MS = 30000; // 面板认领 nonce 后这么久内要等到内容脚本来登记
+const PANEL_NONCE_RE = /^[0-9a-f]{32}$/;
 // 角标：HDR 用主题色，SDR 黑底白字；DRM 视频扩展管不了，不显示 HDR/SDR，免得和实际情况相反
 const BADGE_SDR = { text: 'SDR', color: '#0A0A0A', textColor: '#FAFAFA' };
 const BADGE_DRM = { text: 'DRM', color: '#6B6B6B', textColor: '#FFFFFF' };
@@ -70,8 +75,12 @@ const tabLoads = new Map(); // tabId → 正在从 storage.session 恢复的 Pro
 const badgeSig = new Map();
 const persistTimers = new Map();
 const recheckTimers = new Map();
-// tabId → Set(frameId)：内容脚本和面板握手成功后登记的面板 iframe。没登记的 panel.html（网页自己嵌的副本）一律不认
+// tabId → Map(frameId → {nonce, live})：内容脚本和面板握手成功后登记的面板 iframe，live 只在面板显示期间为 true。
+// 没登记或停用的 panel.html（网页自己嵌的副本、收起的面板）一律不认
 const panelFrames = new Map();
+let panelFramesReady = false;
+// tabId + ':' + nonce → {frameIds: Set, at}：面板加载后用 nonce 认领自己的 frameId，等内容脚本登记时对上
+const panelClaims = new Map();
 
 function noop() {}
 
@@ -161,8 +170,121 @@ function forgetTab(tabId) {
   clearTimeout(recheckTimers.get(tabId));
   recheckTimers.delete(tabId);
   patchRate.delete(tabId);
-  panelFrames.delete(tabId);
+  if (panelFrames.delete(tabId)) persistPanelFrames();
+  for (const k of panelClaims.keys()) if (k.indexOf(tabId + ':') === 0) panelClaims.delete(k);
   call(() => chrome.storage.session.remove(SESSION_PREFIX + tabId)).catch(noop);
+}
+
+// ---------- 播放器内设置面板的登记 ----------
+
+function persistPanelFrames() {
+  const o = {};
+  for (const [tabId, m] of panelFrames) if (m.size) o[tabId] = Array.from(m, ([fid, e]) => [fid, e.nonce, e.live]);
+  call(() => chrome.storage.session.set({ [PANEL_FRAMES_KEY]: o })).catch(noop);
+}
+
+// service worker 启动时读回登记（和这之前已经登记的合并）
+const panelFramesLoad = call(() => chrome.storage.session.get(PANEL_FRAMES_KEY)).then((r) => {
+  const raw = r && r[PANEL_FRAMES_KEY];
+  if (!raw || typeof raw !== 'object') return;
+  for (const k of Object.keys(raw)) {
+    const tabId = Number(k);
+    const pairs = Array.isArray(raw[k]) ? raw[k].filter((x) => Array.isArray(x) && Number.isInteger(x[0]) && x[0] > 0 &&
+      typeof x[1] === 'string' && PANEL_NONCE_RE.test(x[1])) : [];
+    if (!validTabId(tabId) || !pairs.length) continue;
+    const m = panelFrames.get(tabId) || new Map();
+    for (const x of pairs) if (m.size < PANEL_FRAMES_MAX && !m.has(x[0])) m.set(x[0], { nonce: x[1], live: x[2] === true });
+    panelFrames.set(tabId, m);
+  }
+}).catch(noop).then(() => { panelFramesReady = true; });
+
+function panelUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'chrome-extension:' && u.pathname === '/panel.html';
+  } catch (e) {
+    return false;
+  }
+}
+
+// 发消息的是支持控制栏按钮的网站上的内容脚本（扩展自己的页面，包括没登记的 panel.html，都不算）
+function playerFrameSender(sender) {
+  try {
+    const u = new URL(sender.url);
+    return (u.protocol === 'https:' || u.protocol === 'http:') && !!L.playerSite(u.hostname, u.pathname);
+  } catch (e) {
+    return false;
+  }
+}
+
+// {type:'panel-claim', nonce}：面板加载后先用 nonce 认领自己（background 从 sender 知道它的 frameId；
+// 扩展页面和内容脚本都拿不到这个 iframe 的 frameId）。nonce 只经 location.replace 交给真正的 iframe，网页读不到
+function handlePanelClaim(msg, sender) {
+  const tabId = sender.tab && sender.tab.id;
+  const nonce = msg.nonce;
+  if (!validTabId(tabId) || !Number.isInteger(sender.frameId) || sender.frameId <= 0 || typeof nonce !== 'string' || !PANEL_NONCE_RE.test(nonce)) {
+    return { ok: false, code: 'forbidden' };
+  }
+  const now = Date.now();
+  for (const [k, c] of panelClaims) if (now - c.at > PANEL_CLAIM_MS) panelClaims.delete(k);
+  const m = panelFrames.get(tabId);
+  // 已经登记过的 nonce（地址泄漏后网页又嵌了一份）：不再认领
+  if (m) for (const e of m.values()) if (e.nonce === nonce) return { ok: false, code: 'forbidden' };
+  const key = tabId + ':' + nonce;
+  const c = panelClaims.get(key) || { frameIds: new Set(), at: now };
+  c.frameIds.add(sender.frameId);
+  panelClaims.set(key, c);
+  return { ok: true };
+}
+
+// {type:'panel-frame', op:'add'|'open'|'close'|'remove', nonce}：内容脚本和自己插入的面板 iframe 握手成功（端口来自 /panel.html，
+// hello 带着它交给 iframe 的 nonce）后登记那个 nonce 认领的 frameId（'add'，先停用）；面板显示时启用（'open'），
+// 收起时停用（'close'），只有启用的面板能用扩展页面的消息；面板销毁时注销（'remove'）。
+// 只认同一个标签页里播放器 frame 的内容脚本；同一个 nonce 有两个 frame 认领（地址泄漏）时谁都不登记
+async function handlePanelFrame(msg, sender) {
+  const tabId = sender.tab && sender.tab.id;
+  const nonce = msg.nonce;
+  if (!validTabId(tabId) || !playerFrameSender(sender) || typeof nonce !== 'string' || !PANEL_NONCE_RE.test(nonce)) {
+    return { ok: false, code: 'forbidden' };
+  }
+  await panelFramesLoad;
+  let m = panelFrames.get(tabId);
+  if (msg.op === 'remove') {
+    panelClaims.delete(tabId + ':' + nonce);
+    if (m) {
+      for (const [fid, e] of m) if (e.nonce === nonce) m.delete(fid);
+      if (!m.size) panelFrames.delete(tabId);
+      persistPanelFrames();
+    }
+    return { ok: true };
+  }
+  const life = sender.documentLifecycle;
+  if (msg.op === 'open' || msg.op === 'close') {
+    const live = msg.op === 'open';
+    if (live && typeof life === 'string' && life !== 'active') return { ok: false, code: 'forbidden' };
+    let found = false;
+    if (m) for (const e of m.values()) if (e.nonce === nonce) { e.live = live; found = true; }
+    if (found) persistPanelFrames();
+    return found || !live ? { ok: true } : { ok: false, code: 'forbidden' };
+  }
+  if (msg.op !== 'add') return { ok: false, code: 'bad-request' };
+  if (typeof life === 'string' && life !== 'active') return { ok: false, code: 'forbidden' };
+  const key = tabId + ':' + nonce;
+  const c = panelClaims.get(key);
+  panelClaims.delete(key);
+  if (!c || c.frameIds.size !== 1 || Date.now() - c.at > PANEL_CLAIM_MS) return { ok: false, code: 'forbidden' };
+  const fid = c.frameIds.values().next().value;
+  if (fid === sender.frameId) return { ok: false, code: 'forbidden' };
+  m = panelFrames.get(tabId);
+  if (!m) {
+    m = new Map();
+    panelFrames.set(tabId, m);
+  }
+  m.delete(fid);
+  if (m.size >= PANEL_FRAMES_MAX) m.delete(m.keys().next().value);
+  m.set(fid, { nonce: nonce, live: false });
+  persistPanelFrames();
+  return { ok: true };
 }
 
 function bestFrame(t) {
@@ -566,6 +688,8 @@ function patchRateOk(tabId) {
 // （网站相关的只能改自己顶层页面那一条，网站预设只有面板能改），并且按标签页限速
 async function handleSettingsPatch(msg, sender, page) {
   const tabId = sender.tab && sender.tab.id;
+  // 没登记的 panel.html（网页自己嵌的副本、握手前）不按内容脚本对待
+  if (!page && panelUrl(sender.url)) return { ok: false, code: 'forbidden' };
   const inPlayer = !page || page === 'panel';
   if (inPlayer) {
     const life = sender.documentLifecycle;
@@ -1402,7 +1526,7 @@ async function nvLogFromPage(msg, page) {
 
 // 扩展自己的页面 → 'popup' | 'options' | 'diag' | 'panel'；其他（内容脚本、网页）→ ''。
 // 面板是嵌在网页里的扩展 iframe（use_dynamic_url，主机名是动态的）：网页也能自己嵌一份，所以还要求它所在的
-// (tabId, frameId) 已由内容脚本握手登记（panelFrames），文档仍是活动的；其他页面带 tab 时（选项页、诊断页）必须是顶层 frame
+// (tabId, frameId) 已由内容脚本握手登记（panelFrames）且面板正显示着（live），文档仍是活动的；其他页面带 tab 时（选项页、诊断页）必须是顶层 frame
 function fromExtensionPage(sender) {
   try {
     if (!sender || sender.id !== chrome.runtime.id || typeof sender.url !== 'string') return '';
@@ -1411,7 +1535,8 @@ function fromExtensionPage(sender) {
     if (u.pathname === '/panel.html') {
       const frames = sender.tab && validTabId(sender.tab.id) ? panelFrames.get(sender.tab.id) : null;
       const life = sender.documentLifecycle;
-      if (!frames || !frames.has(sender.frameId) || (typeof life === 'string' && life !== 'active')) return '';
+      const reg = frames ? frames.get(sender.frameId) : null;
+      if (!reg || !reg.live || (typeof life === 'string' && life !== 'active')) return '';
     } else if (sender.tab && sender.frameId !== 0) {
       return '';
     }
@@ -1425,7 +1550,18 @@ const internalError = (e) => ({ ok: false, error: { code: 'internal', message: S
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object' || !sender || sender.id !== chrome.runtime.id) return false;
+  // 面板的登记存在 storage.session：service worker 刚启动、还没读出来时，面板发来的消息先等它
+  if (!panelFramesReady && panelUrl(sender.url)) {
+    panelFramesLoad.then(() => {
+      if (!onRuntimeMessage(msg, sender, sendResponse)) sendResponse();
+    });
+    return true;
+  }
+  return onRuntimeMessage(msg, sender, sendResponse);
+});
 
+// 返回 true 表示会异步回复
+function onRuntimeMessage(msg, sender, sendResponse) {
   if (msg.type === 'report') {
     if (!sender.tab) {
       sendResponse({ ok: true });
@@ -1492,8 +1628,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     hoDrop().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false }));
     return true;
   }
+
+  if (msg.type === 'panel-claim' && !page && panelUrl(sender.url)) {
+    sendResponse(handlePanelClaim(msg, sender));
+    return false;
+  }
+
+  if (msg.type === 'panel-frame' && !page) {
+    handlePanelFrame(msg, sender).then(sendResponse, () => sendResponse({ ok: false, code: 'internal' }));
+    return true;
+  }
   return false;
-});
+}
 
 // ---------- 安装 / 更新 ----------
 

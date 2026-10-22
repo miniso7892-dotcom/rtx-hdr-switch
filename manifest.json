@@ -55,6 +55,24 @@
       "run_at": "document_start"
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "panel.html"
+      ],
+      "matches": [
+        "https://bilibili.com/*",
+        "https://player.bilibili.com/*",
+        "https://twitch.tv/*",
+        "https://v.qq.com/*",
+        "https://www.bilibili.com/*",
+        "https://www.twitch.tv/*",
+        "https://www.youtube.com/*",
+        "https://youtube.com/*"
+      ],
+      "use_dynamic_url": true
+    }
+  ],
   "commands": {
     "toggle-hdr": {
       "suggested_key": {

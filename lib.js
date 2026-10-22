@@ -972,6 +972,32 @@
     return { x: Math.round(x), y: Math.round(b.top - g - hh), h: Math.round(hh) };
   }
 
+  // ---------- 播放器内设置面板 ----------
+
+  const PANEL_W = 320;
+  const PANEL_MIN_W = 260;
+  const PANEL_MIN_H = 160;
+
+  // 面板宽度：320，播放器窄于 336 时用播放器宽度减 16；播放器窄于 260 时不开面板，返回 null
+  function panelWidth(rootWidth) {
+    const w = +rootWidth;
+    if (!isFinite(w) || w < PANEL_MIN_W) return null;
+    return Math.max(PANEL_MIN_W, Math.min(PANEL_W, Math.floor(w - 16)));
+  }
+
+  // 面板「本视频」三段该选哪一段：有手动选择时是当前状态，有记忆时是记住的状态，否则是跟随规则
+  function panelVideoChoice(st) {
+    if (!isObj(st) || !st.hasVideo) return 'follow';
+    if (st.manual && (st.state === 'on' || st.state === 'off')) return st.state;
+    if (st.saved === 'on' || st.saved === 'off') return st.saved;
+    return 'follow';
+  }
+
+  // 面板 iframe 的 web_accessible_resources.matches：PLAYER_HOSTS 的每个域名，按字母排序
+  function panelMatches() {
+    return Object.keys(PLAYER_HOSTS).sort().map(function (h) { return 'https://' + h + '/*'; });
+  }
+
   // entries: storage 对象或 [key, value] 数组；返回需要删除的 v: 键（最旧的先删）
   function pruneKeys(entries, max) {
     const limit = typeof max === 'number' && max >= 0 ? Math.floor(max) : MAX_VIDEO_ENTRIES;
@@ -2320,6 +2346,10 @@
     // 1.3：播放器面板
     PLAYER_HOSTS: PLAYER_HOSTS,
     placeAbove: placeAbove,
+    PANEL_MIN_H: PANEL_MIN_H,
+    panelWidth: panelWidth,
+    panelVideoChoice: panelVideoChoice,
+    panelMatches: panelMatches,
     nvEffectiveState: nvUnleased,
     nvRevertPatch: nvRevertPatch,
     // 1.3：NVIDIA 写入、修改记录、撤销
